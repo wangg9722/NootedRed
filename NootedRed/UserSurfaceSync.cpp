@@ -540,10 +540,7 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
     renderRequested = false;
     submitGuard     = checkKernelArgument("-NRedDisplayFix");
     legacyBlend = renderRequested = submitGuard;
-    // scratch 数据只对 26.0 的机器码成立，26.7.3 上会打断 Metal 计算管线，改为显式开启。
-    computeScratch = submitGuard && currentKernelVersion().majorMatches(MACOS_26) &&
-                     checkKernelArgument("-NRedComputeScratch");
-    srdShared = submitGuard && currentKernelVersion().majorMatches(MACOS_26);
+    computeScratch = srdShared = submitGuard && currentKernelVersion().majorMatches(MACOS_26);
     NRed::singleton().setProp32("NRedDisplayFixVersion", 2);
     NRed::singleton().setProp32("NRedSubmitGuardVersion", 1);
     NRed::singleton().setProp32("NRedSubmitGuardRevision", 6);

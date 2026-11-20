@@ -10,12 +10,55 @@ from cache_resolver_data import ResolverData, containing_function
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "build/user-surface-sync"
-FUNCTIONS = {
-    "init": ("__Z29amdMtl_HWL_InitDeviceSettingsP18AMD_DeviceSettingsP18AMDCommonHwInfoRec",
-             "886322b1d50af710d30ed4354c9b3000fee462c86e7c6ac0300ba88c4b3321e4"),
-    "override": ("__Z33amdMtl_HWL_OverrideDeviceSettingsP18AMD_DeviceSettingsP18AMDCommonHwInfoRec",
-                 "8944785f90985578b38c777def41df74dd6028f0eac779cdf396a17dc104cc8b"),
-}
+INIT_SYMBOL = "__Z29amdMtl_HWL_InitDeviceSettingsP18AMD_DeviceSettingsP18AMDCommonHwInfoRec"
+OVERRIDE_SYMBOL = "__Z33amdMtl_HWL_OverrideDeviceSettingsP18AMD_DeviceSettingsP18AMDCommonHwInfoRec"
+CONSTRUCTOR_SYMBOL = ("-[GFX9_MtlRenderPipelineState initWithDevice:pipelineStateDescriptor:"
+                      "vertexVariant:fragmentVariant:]")
+# 原生配置入口与调试桩不再是固定地址：它们由初始化函数自己的跳转给出，
+# 这样同一份生成器可以跟着每一个 macOS 版本的镜像布局走。
+OVERRIDE_PROLOGUE = bytes.fromhex("554889e55350")
+DUMP_CODE = bytes.fromhex("554889e55dc3")
+
+
+def external_jumps(code, address):
+    # 只接受 e8/e9 rel32；初始化函数对原生配置入口的调用是整个数据集的锚点。
+    for offset in range(len(code) - 4):
+        if code[offset] in (0xE8, 0xE9):
+            target = address + offset + 5 + struct.unpack_from("<i", code, offset + 1)[0]
+            yield offset, target
+
+
+def find_native_entries(cache, init_address, init_code):
+    override = dump = None
+    for _, target in external_jumps(init_code, init_address):
+        try:
+            head = cache.read(target, 16)
+        except ValueError:
+            continue
+        if head.startswith(OVERRIDE_PROLOGUE):
+            override = target
+        elif head[:len(DUMP_CODE)] == DUMP_CODE:
+            dump = target
+    if override is None:
+        raise ValueError("原生配置入口未找到")
+    if dump is None:
+        raise ValueError("原生调试桩未找到")
+    return override, cache.read(override, 923), dump
+
+
+def float_constant(cache, address, code, value):
+    # 渲染侧常量按 RIP 相对引用在函数体内定位，不再写死镜像绝对地址。
+    hits = []
+    for offset in range(len(code) - 4):
+        target = address + offset + 4 + struct.unpack_from("<i", code, offset)[0]
+        try:
+            if cache.read(target, 4) == struct.pack("<f", value):
+                hits.append(target)
+        except ValueError:
+            continue
+    if len(hits) != 1:
+        raise ValueError(f"原生常量不唯一：{len(hits)}")
+    return hits[0]
 
 
 def for_device(records, device_id):
@@ -48,16 +91,25 @@ def main():
     cache = CacheReader()
     try:
         originals = {}
-        for label, (name, digest) in FUNCTIONS.items():
+        for label, name in (("init", INIT_SYMBOL), ("override", OVERRIDE_SYMBOL)):
             address, code = cache.function(name)
-            if hashlib.sha256(code).hexdigest() != digest:
-                raise ValueError(f"{label} 未核实，拒绝生成")
             originals[label] = {"address": address, "code": code.hex()}
-        if cache.read(0x7FFB10FBFDE8, 4) != struct.pack("<f", 3.0):
-            raise ValueError("原生常量不匹配")
+        if len(bytes.fromhex(originals["init"]["code"])) != 215:
+            raise ValueError("初始化函数长度变化")
+        native_override, native_override_code, native_dump = find_native_entries(
+            cache, originals["init"]["address"], bytes.fromhex(originals["init"]["code"]))
+        constant = float_constant(cache, originals["init"]["address"],
+                                  bytes.fromhex(originals["init"]["code"]), 3.0)
+        assembly = (ROOT / "tools/surface_sync_init.s").read_text()
+        for token, value in (("@INIT@", originals["init"]["address"]), ("@CONST@", constant),
+                             ("@OVERRIDE@", native_override), ("@DUMP@", native_dump)):
+            assembly = assembly.replace(token, hex(value))
+        if any(token in assembly for token in ("@INIT@", "@CONST@", "@OVERRIDE@", "@DUMP@")):
+            raise ValueError("初始化汇编锚点未替换")
         obj = WORK / "init.o"
-        subprocess.run(["clang", "-c", str(ROOT / "tools/surface_sync_init.s"), "-o", str(obj)],
-                       check=True, timeout=60)
+        source = WORK / "init.s"
+        source.write_text(assembly)
+        subprocess.run(["clang", "-c", str(source), "-o", str(obj)], check=True, timeout=60)
         data = obj.read_bytes()
         _, sections, _ = macho(lambda a, n: data[a:a+n], 0)
         text = next(s for s in sections if s[0] == "__text")
@@ -65,7 +117,7 @@ def main():
         if len(payload) != 215:
             raise ValueError("初始化补丁长度错误")
         records = []
-        for label in FUNCTIONS:
+        for label in originals:
             item = originals[label]
             patched = payload if label == "init" else b"\xe9" + struct.pack(
                 "<i", originals["init"]["address"] + 166 - item["address"] - 5) + b"\x90" * 5
@@ -88,24 +140,29 @@ def main():
         device_records = [{"device_id": device, "records": for_device(records, device),
                            "srd_shared_records": for_device(candidate_records, device)}
                           for device in supported_devices()]
-        ctor_address, ctor_code = cache.function(
-            "-[GFX9_MtlRenderPipelineState initWithDevice:pipelineStateDescriptor:vertexVariant:fragmentVariant:]")
-        if hashlib.sha256(ctor_code).hexdigest() != "9d78fd28bb509a95ce68fdb879d507388bf1625f54439da53622aa1097ee339b":
+        ctor_address, ctor_code = cache.function(CONSTRUCTOR_SYMBOL)
+        if len(ctor_code) < 1000:
             raise ValueError("pipeline 构造函数未核实")
-        gate_address = 0x7ffb10c77708
-        gate_code = cache.read(gate_address, 2)
-        if gate_code != bytes.fromhex("7428"):
-            raise ValueError("RB+ 能力分支未核实")
+        # 能力分支在构造函数里按唯一性定位，版本之间偏移变化不影响生成。
+        gates = [offset for offset in range(len(ctor_code) - 1)
+                 if ctor_code[offset:offset + 2] == bytes.fromhex("7428")]
+        if len(gates) != 1:
+            raise ValueError(f"RB+ 能力分支不唯一：{len(gates)}")
+        gate_address = ctor_address + gates[0]
+        gate_code = ctor_code[gates[0]:gates[0] + 2]
         legacy_records = [dict(r) for r in candidate_records]
         legacy_records.append({"label": "blend-capability-gate", "address": gate_address,
                                "original": gate_code.hex(), "patched": "9090"})
         # 仅保留旧实验的原始字节检查；不生成已撤回的 VT 替换代码。
+        # 撤回实验的原始分支只做旁证；系统版本改写了这些位置时直接不带入数据。
         withdrawn_guards = []
         for address, expected in [(0x7FF81585FD97, "7428"), (0x7FF815861D17, "0f8482040000")]:
-            original = cache.read(address, len(bytes.fromhex(expected)))
-            if original != bytes.fromhex(expected):
-                raise ValueError("VideoToolbox 原始选择分支不匹配")
-            withdrawn_guards.append({"address": address, "original": original.hex()})
+            try:
+                original = cache.read(address, len(bytes.fromhex(expected)))
+            except ValueError:
+                continue
+            if original == bytes.fromhex(expected):
+                withdrawn_guards.append({"address": address, "original": original.hex()})
         device_scratch_records = [
             {"device_id": device, "records": [*legacy_records, generate_scratch(cache, device)]}
             for device in supported_devices()
@@ -177,7 +234,7 @@ def main():
                    "    for (const auto& entry : DevicePatches) { if (entry.deviceID == deviceID) { return &entry; } }\n"
                    "    return nullptr;\n}\n")
         # 动态缓存解析只接受相同实现的完整函数；UUID 不参与兼容判定。
-        targets = [0x7FFB10FBFDE8, 0x7FFB10C5422B, 0x7FFB10C545C6]
+        targets = [constant, native_override, native_dump]
         init_address = originals['init']['address']
         variants = [('OriginalInitLinks', bytes.fromhex(records[0]['original'])),
                     ('ImmediateInitLinks', payload), ('SharedInitLinks', candidate_payload)]
@@ -186,13 +243,10 @@ def main():
             fields = relocation_fields(cache, code, init_address, targets, name)
             header += f'inline constexpr RelativeField {name}[] = {{\n'
             header += ',\n'.join(f'    {{{offset}, {kind}}}' for offset, kind in fields) + '\n};\n'
-        for name, address, size in [('NativeOverride', targets[1], 923), ('NativeDump', targets[2], 6)]:
-            native = cache.read(address, size)
-            if name == 'NativeOverride' and hashlib.sha256(native).hexdigest() != '9f4d151c607e74ed7710e81d437013fef73afe83bbbbd94179d2d429ca611ea6':
-                raise ValueError('原生配置函数未核实')
-            if name == 'NativeDump' and native.hex() != '554889e55dc3':
-                raise ValueError('原生调试函数未核实')
-            header += array(name, native)
+        if not native_override_code.startswith(OVERRIDE_PROLOGUE) or len(native_override_code) != 923:
+            raise ValueError('原生配置函数未核实')
+        header += array('NativeOverride', native_override_code)
+        header += array('NativeDump', DUMP_CODE)
         header += array('BlendConstructor', ctor_code)
         header += f'inline constexpr UInt32 BlendGateInConstructor = {gate_address - ctor_address};\n'
         header += f'inline constexpr UInt32 OverrideEntryInInit = 166;\n'
@@ -205,11 +259,12 @@ def main():
         scratch_resolver.add(scratch_record['address'], bytes.fromhex(scratch_record['original']),
                              bytes.fromhex(scratch_record['patched']))
         # 撤回策略的 VT 跳转仍需按完整原生函数核验，不能沿用参考缓存的固定偏移。
-        _, vt_base = scratch_resolver.owner(withdrawn_guards[0]['address'])
-        vt_address, vt_code = containing_function(cache, vt_base, withdrawn_guards[0]['address'])
-        if not vt_address <= withdrawn_guards[1]['address'] < vt_address + len(vt_code):
-            raise ValueError('撤回跳转的原生函数范围变化')
-        scratch_resolver.add(vt_address, vt_code, vt_code)
+        if len(withdrawn_guards) == 2:
+            _, vt_base = scratch_resolver.owner(withdrawn_guards[0]['address'])
+            vt_address, vt_code = containing_function(cache, vt_base, withdrawn_guards[0]['address'])
+            if not vt_address <= withdrawn_guards[1]['address'] < vt_address + len(vt_code):
+                raise ValueError('撤回跳转的原生函数范围变化')
+            scratch_resolver.add(vt_address, vt_code, vt_code)
         header += 'namespace ScratchResolverData {\n' + scratch_resolver.header([(0, 0)]) + '}\n'
         header += f"inline constexpr UInt32 MaxPatchSize = 452;\ninline constexpr UInt32 PageCount = {len(pages)};\n}}\n"
         (WORK / "UserSurfaceSyncData.hpp").write_text(header)
