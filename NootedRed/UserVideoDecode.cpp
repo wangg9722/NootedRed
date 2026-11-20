@@ -161,6 +161,9 @@ namespace
     {
         using namespace UserVideoDecodeData;
         if (count == 0 || count > PatchCount || count > 32 || mask == 0 || (count < 32 && (mask >> count) != 0)) {
+            NRed::singleton().setProp32("NRedVCNUserFpReason", 1);
+            NRed::singleton().setProp32("NRedVCNUserFpCount", count);
+            NRed::singleton().setProp32("NRedVCNUserFpMask", mask);
             return false;
         }
         UInt32 selectedCount{0};
@@ -176,6 +179,8 @@ namespace
             else if (readUser(base + patch.offset, bytes, patch.size) != 0
                      || memcmp(bytes, patch.original, patch.size) != 0)
             {
+                NRed::singleton().setProp32("NRedVCNUserFpReason", 3);
+                NRed::singleton().setProp32("NRedVCNUserFpIndex", i);
                 return false;
             }
         }
@@ -265,6 +270,11 @@ namespace
             }
             if (!UserVideoDecodeResolver::resolve(readUser, base, devicePatches, *dynamicBuffer.plan)) {
                 stage(Stage::CacheMismatch, fairPlayPID);
+                NRed::singleton().setProp32("NRedVCNUserDynStep", UserCacheResolver::diagnosticStage());
+                NRed::singleton().setProp32("NRedVCNUserDynFn", UserCacheResolver::diagnosticFunction());
+                NRed::singleton().setProp32("NRedVCNUserDynRef", UserCacheResolver::diagnosticReference());
+                NRed::singleton().setProp32("NRedVCNUserDynImg", UserCacheResolver::diagnosticImage());
+                NRed::singleton().setProp32("NRedVCNUserDynRelaxed", UserCacheResolver::diagnosticRelaxed());
                 NRed::singleton().setProp32("NRedVCNUserDynamicRejected", 1);
                 return result;
             }
@@ -306,6 +316,8 @@ namespace
                 ++patched;
             }
             else {
+                NRed::singleton().setProp32("NRedVCNUserFpReason", 4);
+                NRed::singleton().setProp32("NRedVCNUserFpIndex", i);
                 stage(Stage::CodeMismatch, fairPlayPID);
                 error(KERN_INVALID_ARGUMENT);
                 return result;

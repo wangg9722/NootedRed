@@ -17,6 +17,13 @@ namespace UserSurfaceSyncResolver
     using UserSharedCache::setRelative;
     using UserSharedCache::UserLimit;
     using UserSharedCache::word;
+    // 诊断：记录本解析器最后失败的步骤编号。
+    inline UInt32& diagnosticReason()
+    {
+        static UInt32 value{0};
+        return value;
+    }
+
     struct Plan
     {
         UserSurfaceSyncData::Patch patches[4]{};
@@ -28,6 +35,45 @@ namespace UserSurfaceSyncResolver
     {
         return UserSharedCache::imageForCache(input, base, image, DriverPath, sizeof(DriverPath))
                && image.constantCount != 0 && image.text.size <= MaxTextSize;
+    }
+
+
+    // 模板里含 rel32 位移；不同系统构建上这些字节会变，比较时按指令形态跳过。
+    inline bool displacementByte(const UInt8* expected, UInt32 index, UInt32 size)
+    {
+        const UInt32 from = index > 3 ? index - 3 : 0;
+        for (UInt32 pos = from; pos <= index; ++pos) {
+            const UInt8 b = expected[pos];
+            if ((b == 0xE8 || b == 0xE9) && index - pos >= 1 && index - pos <= 4) { return true; }
+            if (pos + 2 < size && (b == 0x48 || b == 0x4C)) {
+                const UInt8 op = expected[pos + 1], modrm = expected[pos + 2];
+                if ((op == 0x8D || op == 0x8B || op == 0x89 || op == 0x39 || op == 0x3B)
+                    && (modrm & 0xC7) == 0x05 && index > pos + 2 && index - (pos + 2) <= 4)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+
+    // 大函数在 26.x 上可能有极少量非位移字节差异；按差异预算比较，仍要求前 32 字节严格一致。
+    inline bool similar(Input& input, UInt64 address, const UInt8* expected, UInt32 size, UInt32 maxDiff)
+    {
+        UInt8  chunk[256];
+        UInt32 diff = 0;
+        for (UInt32 offset = 0; offset < size;) {
+            const UInt32 length = size - offset < 256 ? size - offset : 256;
+            if (!input.read(address + offset, chunk, length)) { return false; }
+            for (UInt32 i = 0; i < length; ++i) {
+                const UInt32 index = offset + i;
+                if (chunk[i] == expected[index] || displacementByte(expected, index, size)) { continue; }
+                if (++diff > maxDiff) { return false; }
+            }
+            offset += length;
+        }
+        return !input.failed;
     }
 
     inline bool skipped(UInt32 index, const RelativeField* fields, UInt32 fieldCount)
@@ -45,6 +91,7 @@ namespace UserSurfaceSyncResolver
                                              [&](UInt32 index, UInt8 value)
                                              {
                                                  return skipped(index, fields, fieldCount)
+                                                        || (!fields && displacementByte(expected, index, size))
                                                         || (blend && index >= BlendGateInConstructor
                                                             && index - BlendGateInConstructor < 2)
                                                         || value == expected[index];
@@ -52,12 +99,24 @@ namespace UserSurfaceSyncResolver
     }
 
     inline bool findFunction(Input& input, const Range& text, const UInt8* expected, UInt32 size, UInt64& found,
-                             bool blend = false, UInt64 hint = 0)
+                             bool blend = false, UInt64 hint = 0, UInt32 diffBudget = 0)
     {
         if (size < 32) { return false; }
         return UserCacheResolver::scanFunction(
-            input, text, size, 32, [&](const UInt8* bytes) { return memcmp(bytes, expected, 32) == 0; },
-            [&](UInt64 address) { return matches(input, address, expected, size, nullptr, 0, blend); }, found, hint);
+            input, text, size, 32,
+            [&](const UInt8* bytes)
+            {
+                for (UInt32 i = 0; i < 32; ++i) {
+                    if (bytes[i] != expected[i] && !displacementByte(expected, i, size)) { return false; }
+                }
+                return true;
+            },
+            [&](UInt64 address)
+            {
+                if (diffBudget && similar(input, address, expected, size, diffBudget)) { return true; }
+                return matches(input, address, expected, size, nullptr, 0, blend);
+            },
+            found, hint);
     }
 
     inline bool resolve(Reader reader, UInt64 base, const DevicePatchSet& device, bool shared, bool blend, Plan& plan,
@@ -65,7 +124,10 @@ namespace UserSurfaceSyncResolver
     {
         Input input{reader, {}};
         Image image;
-        if (!imageForCache(input, base, image)) { return false; }
+        if (!imageForCache(input, base, image)) {
+            diagnosticReason() = 1;
+            return false;
+        }
         // Scratch 与撤回的 VT 策略按完整函数和实际相对引用核验。
         if (scratchMode) {
             using namespace ScratchResolverData;
@@ -73,18 +135,28 @@ namespace UserSurfaceSyncResolver
                                             ResolverLocations, plan.patches + 3, &plan.original[3][0],
                                             &plan.patched[3][0], MaxPatchSize))
             {
+                diagnosticReason() = 2;
                 return false;
             }
         }
         UInt64 settings{0}, scratch{0}, constructor{0};
         if (!findFunction(input, image.text, NativeOverride, sizeof(NativeOverride), settings, false,
-                          image.address + NativeOverrideRVA)
-            || (!scratchMode
-                && !findFunction(input, image.text, ScratchOriginal, sizeof(ScratchOriginal), scratch, false,
-                                 image.address + ScratchRVA))
-            || !findFunction(input, image.text, BlendConstructor, sizeof(BlendConstructor), constructor, true,
-                             image.address + ConstructorRVA))
+                          image.address + NativeOverrideRVA))
         {
+            diagnosticReason() = 31;
+            return false;
+        }
+        if (!scratchMode
+            && !findFunction(input, image.text, ScratchOriginal, sizeof(ScratchOriginal), scratch, false,
+                             image.address + ScratchRVA))
+        {
+            diagnosticReason() = 32;
+            return false;
+        }
+        if (!findFunction(input, image.text, BlendConstructor, sizeof(BlendConstructor), constructor, true,
+                          image.address + ConstructorRVA, 96))
+        {
+            diagnosticReason() = 33;
             return false;
         }
         const UInt8*         variants[] = {Original0, device.immediate[0].patched, device.shared[0].patched};
@@ -129,6 +201,7 @@ namespace UserSurfaceSyncResolver
                 },
                 [&](UInt64 address) { return matchInitAt(address, targets); }, init, image.address + InitRVA))
         {
+            diagnosticReason() = 4;
             return false;
         }
         UInt64     overrideAddress{0};
@@ -153,6 +226,7 @@ namespace UserSurfaceSyncResolver
                 },
                 matchOverrideAt, overrideAddress, image.address + OverrideRVA))
         {
+            diagnosticReason() = 5;
             return false;
         }
         const auto* source =
@@ -164,6 +238,7 @@ namespace UserSurfaceSyncResolver
             if (!setRelative(plan.original[0], OriginalInitLinks[k].offset, init, targets[OriginalInitLinks[k].target])
                 || !setRelative(plan.patched[0], patchedLinks[k].offset, init, targets[patchedLinks[k].target]))
             {
+                diagnosticReason() = 6;
                 return false;
             }
         }
@@ -172,6 +247,7 @@ namespace UserSurfaceSyncResolver
         if (!setRelative(plan.original[1], 6, overrideAddress, settings)
             || !setRelative(plan.patched[1], 1, overrideAddress, init + OverrideEntryInInit))
         {
+            diagnosticReason() = 7;
             return false;
         }
         memcpy(plan.original[2], BlendGateOriginal, sizeof(BlendGateOriginal));
@@ -179,7 +255,10 @@ namespace UserSurfaceSyncResolver
         const UInt64 addresses[] = {init, overrideAddress, constructor + BlendGateInConstructor};
         for (UInt32 i = 0; i < 3; ++i) {
             const auto length = i == 0 ? sizeof(Original0) : (i == 1 ? sizeof(Original1) : sizeof(BlendGateOriginal));
-            if (!input.cache.contains(addresses[i], length)) { return false; }
+            if (!input.cache.contains(addresses[i], length)) {
+                diagnosticReason() = 8;
+                return false;
+            }
             plan.patches[i] = {addresses[i] - base, plan.original[i], plan.patched[i], static_cast<UInt32>(length)};
         }
         plan.reads = input.reads;

@@ -9,7 +9,6 @@ from metal_cache import CacheReader, macho
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / 'build/user-surface-sync/scratch'
 SYMBOL = '__ZL33amdMtl_GFX9_AllocateScratchBufferP28GFX9_MtlComputePipelineStatej'
-DIGEST = '901b678273297d0148c2cf9c4812cab5281e80338414eba0f0f3570b4bca8c8d'
 
 
 def supported_devices():
@@ -28,8 +27,13 @@ def generate(cache, device_id=0x1638):
         raise ValueError(f'不支持的 NRed APU PCI ID：{device_id:#06x}')
     WORK.mkdir(parents=True, exist_ok=True)
     address, original = cache.function(SYMBOL)
-    if len(original) != 452 or hashlib.sha256(original).hexdigest() != DIGEST:
-        raise ValueError('scratch 分配函数未核实')
+    EXPECTED = {0x32: bytes.fromhex('488d05'), 0x39: bytes.fromhex('4c8b28'),
+                0x49: bytes.fromhex('b9'), 0x55: bytes.fromhex('438b842e'),
+                0xB3: bytes.fromhex('488d35'), 0xBD: bytes.fromhex('8bbc')}
+    if len(original) != 452 or any(not original[o:o + len(b)].startswith(b)
+                                   for o, b in EXPECTED.items()):
+        raise ValueError('scratch 分配函数结构未核实')
+    layout = original[0xBD:0xBD + 7]
     source = WORK / 'native.s'
     source.write_text('.text\n.globl _native\n_native:\n.byte ' + ','.join(str(x) for x in original) + '\n')
     obj = WORK / 'native.o'
@@ -65,7 +69,7 @@ def generate(cache, device_id=0x1638):
         elif offset == 0x49:
             emit(bytes.fromhex('83c9ff'))  # ecx=UINT32_MAX；下一条 cmp 重建 flags。
         elif offset == 0xBD:
-            emit(bytes.fromhex('8bbc3138020000'))  # 同一不可变 ivar offset，只读取一次。
+            emit(layout)  # 保留本版本寄存器分配，只读取一次 ivar offset。
         elif mnemonic.startswith('j') or (mnemonic == 'callq' and not operand.startswith('*')):
             match = re.match(r'0x([a-f0-9]+)', operand)
             if not match:

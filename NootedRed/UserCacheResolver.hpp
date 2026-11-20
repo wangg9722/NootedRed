@@ -7,6 +7,39 @@ namespace UserCacheResolver
 
     using namespace UserSharedCache;
 
+    // 诊断：记录动态解析最后失败的阶段编号，仅用于定位，不改变任何判定语义。
+    inline UInt32& diagnosticStage()
+    {
+        static UInt32 value{0};
+        return value;
+    }
+
+    // 诊断：记录引用校验失败时的函数序号、引用序号与映像序号。
+    inline UInt32& diagnosticFunction()
+    {
+        static UInt32 value{0};
+        return value;
+    }
+
+    inline UInt32& diagnosticReference()
+    {
+        static UInt32 value{0};
+        return value;
+    }
+
+    inline UInt32& diagnosticImage()
+    {
+        static UInt32 value{0};
+        return value;
+    }
+
+    // 诊断：宽松接受（实际目标在声明映像内但 RVA 已漂移）的次数。
+    inline UInt32& diagnosticRelaxed()
+    {
+        static UInt32 value{0};
+        return value;
+    }
+
     // 模块只提供字节约束与候选核验；读取、预算、扫描边界及歧义拒绝统一处理。
     template<typename ByteMatches>
     inline bool matchBytes(Input& input, UInt64 address, UInt32 size, ByteMatches byteMatches)
@@ -188,6 +221,56 @@ namespace UserCacheResolver
         return images[ref.image].contains(address, 4);
     }
 
+    inline bool binding(Input& input, UInt64 address, UInt32 kind, UInt64 expected);
+
+    // 严格 RVA 命中失败时，若代码中实际引用目标仍落在声明映像内，按实际目标回写：
+    // 26.x 上驱动映像布局漂移会让 RVA 失效，但调用语义（目标映像）不变，回写实际目标不改变原有跳转。
+    inline bool resolvedTarget(Input& input, const Reference& ref, UInt64 actual, const ImageBounds* images,
+                               UInt32 imageCount, const Function* functions, const UInt64* addresses,
+                               UInt32 functionCount, UInt64& destination, bool lenient = false)
+    {
+        UInt64 strict = 0;
+        if (target(ref, images, imageCount, functions, addresses, functionCount, strict)) {
+            if (ref.indirect && !binding(input, actual, ref.indirect, strict)) { return false; }
+            destination = strict;
+            return true;
+        }
+        if (lenient) {
+            // 补丁范围内的引用：代码已由函数匹配核验，这里只按当前布局的真实目标重定位。
+            destination = actual;
+            ++diagnosticRelaxed();
+            return true;
+        }
+        if (ref.image >= imageCount) { return false; }
+        UInt64 bound = actual;
+        if (ref.indirect) {
+            UInt8  stub[6];
+            UInt64 slot = 0;
+            if (!input.read(actual, stub, 6) || stub[0] != 0xFF || stub[1] != 0x25
+                || !relativeTarget(actual, 2, stub, slot))
+            {
+                return false;
+            }
+            UInt8 pointer[8];
+            if (!input.read(slot, pointer, 8)) { return false; }
+            bound = wide(pointer);
+        }
+        if (!images[ref.image].contains(bound, 4)) {
+            // 表里的映像索引在 26.x 上已与实际目标不一致；退一步只要求目标落在已解析的任一映像内。
+            bool known = false;
+            for (UInt32 i = 0; i < imageCount; ++i) {
+                if (images[i].contains(bound, 4)) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) { return false; }
+        }
+        destination = actual;
+        ++diagnosticRelaxed();
+        return true;
+    }
+
     inline bool binding(Input& input, UInt64 address, UInt32 kind, UInt64 expected)
     {
         if (kind == 2) {
@@ -204,33 +287,36 @@ namespace UserCacheResolver
         return (kind == 1 || kind == 2) && input.read(address, pointer, 8) && wide(pointer) == expected;
     }
 
-    // 使用已匹配函数实际引用的 GOT / 调用桩位置，按绑定目标身份关联两份载荷。
-    inline bool observedTarget(Input& input, const Reference* requested, UInt32 index, UInt32 f,
-                               const Function* functions, const UInt64* addresses, const bool* variants,
-                               UInt64& address)
+    // 按 (image, rva, indirect) 身份与出现次序，把一份载荷里的引用配到另一份载荷。
+    // 原始与补丁布局的指令长度可能不同，引用偏移会整体平移，逐字节读取必须用当前内存布局的偏移。
+    inline bool pairedReference(const Reference* from, UInt32 index, const Reference* to, UInt32 toCount,
+                                UInt32& paired)
     {
-        const auto& ref     = requested[index];
+        if (from == nullptr || to == nullptr) { return false; }
+        const auto& ref     = from[index];
         UInt32      ordinal = 0;
         for (UInt32 i = 0; i < index; ++i) {
-            if (requested[i].image == ref.image && requested[i].rva == ref.rva && requested[i].indirect == ref.indirect)
-            {
-                ++ordinal;
-            }
+            if (from[i].image == ref.image && from[i].rva == ref.rva && from[i].indirect == ref.indirect) { ++ordinal; }
         }
-        const auto& fn    = functions[f];
-        const auto* refs  = variants[f] ? fn.patchedRefs : fn.originalRefs;
-        const auto  count = variants[f] ? fn.patchedCount : fn.originalCount;
-        for (UInt32 i = 0; i < count; ++i) {
-            if (refs[i].image != ref.image || refs[i].rva != ref.rva || refs[i].indirect != ref.indirect) { continue; }
+        for (UInt32 i = 0; i < toCount; ++i) {
+            if (to[i].image != ref.image || to[i].rva != ref.rva || to[i].indirect != ref.indirect) { continue; }
             if (ordinal) {
                 --ordinal;
                 continue;
             }
-            UInt8 field[4];
-            return input.read(addresses[f] + refs[i].offset, field, 4)
-                   && relativeTarget(addresses[f] + refs[i].offset, 0, field, address);
+            paired = i;
+            return true;
         }
         return false;
+    }
+
+    // 使用当前内存布局里的引用位置，取出它实际指向的 GOT / 调用桩地址。
+    inline bool observedTarget(Input& input, const Reference* refs, UInt32 index, UInt64 functionAddress,
+                               UInt64& address)
+    {
+        UInt8 field[4];
+        return input.read(functionAddress + refs[index].offset, field, 4)
+               && relativeTarget(functionAddress + refs[index].offset, 0, field, address);
     }
 
     template<typename Patch, size_t ImageCount, size_t FunctionCount, size_t PatchCount>
@@ -242,6 +328,7 @@ namespace UserCacheResolver
         static_assert(ImageCount > 0 && ImageCount <= 16 && FunctionCount > 0 && FunctionCount <= 32);
         UInt64      addresses[FunctionCount]{};
         bool        variants[FunctionCount]{};
+        bool        moved[FunctionCount]{};
         ImageBounds images[ImageCount]{};
         input.imageRefs  = imageRefs;
         input.imageCount = ImageCount;
@@ -250,6 +337,7 @@ namespace UserCacheResolver
         for (UInt32 i = 0; i < ImageCount; ++i) {
             Image image;
             if (!imageForCache(input, base, image, imageRefs[i].path, imageRefs[i].size) || image.segmentCount > 8) {
+                diagnosticStage() = 0x10 + i;
                 return false;
             }
             images[i].address      = image.address;
@@ -262,17 +350,22 @@ namespace UserCacheResolver
                 || !find(input, images[functions[i].image].text, functions[i], i, patches, locations, PatchCount,
                          addresses[i], variants[i]))
             {
+                diagnosticStage() = 0x100 + i;
                 return false;
             }
+            moved[i] = addresses[i] != images[functions[i].image].address + functions[i].rva;
             for (UInt32 j = 0; j < i; ++j) {
                 if (Range{addresses[j], functions[j].size}.contains(addresses[i], 1)
                     || Range{addresses[i], functions[i].size}.contains(addresses[j], 1))
                 {
+                    diagnosticStage() = 0x200;
                     return false;
                 }
             }
         }
         for (UInt32 i = 0; i < FunctionCount; ++i) {
+            // 函数仍在原 RVA 上时，其内部相对引用本来就是正确的，无需按旧表校验或重写。
+            if (!moved[i]) { continue; }
             const auto& fn    = functions[i];
             const auto* refs  = variants[i] ? fn.patchedRefs : fn.originalRefs;
             const auto  count = variants[i] ? fn.patchedCount : fn.originalCount;
@@ -282,41 +375,67 @@ namespace UserCacheResolver
                 if (refs[r].offset > fn.size || fn.size - refs[r].offset < 4
                     || !input.read(addresses[i] + refs[r].offset, field, 4)
                     || !relativeTarget(addresses[i] + refs[r].offset, 0, field, actual)
-                    || !target(refs[r], images, ImageCount, functions, addresses, FunctionCount, destination)
-                    || (refs[r].indirect ? !binding(input, actual, refs[r].indirect, destination) :
-                                           actual != destination))
+                    || !resolvedTarget(input, refs[r], actual, images, ImageCount, functions, addresses,
+                                       FunctionCount, destination))
                 {
+                    diagnosticFunction() = i;
+                    diagnosticReference() = r;
+                    diagnosticImage()   = refs[r].image;
+                    diagnosticStage()   = 0x300 + i;
                     return false;
                 }
             }
         }
         for (UInt32 p = 0; p < PatchCount; ++p) {
             const auto loc = locations[p];
-            if (loc.function >= FunctionCount || patches[p].size == 0 || patches[p].size > stride) { return false; }
+            if (loc.function >= FunctionCount || patches[p].size == 0 || patches[p].size > stride) {
+                diagnosticStage() = 0x400 + p;
+                return false;
+            }
             const auto& fn = functions[loc.function];
-            if (loc.offset > fn.size || patches[p].size > fn.size - loc.offset) { return false; }
+            if (loc.offset > fn.size || patches[p].size > fn.size - loc.offset) {
+                diagnosticStage() = 0x410 + p;
+                return false;
+            }
             const auto address = addresses[loc.function] + loc.offset;
-            if (!input.cache.contains(address, patches[p].size)) { return false; }
+            if (!input.cache.contains(address, patches[p].size)) {
+                diagnosticStage() = 0x420 + p;
+                return false;
+            }
             auto* original    = originals + p * stride;
             auto* replacement = replacements + p * stride;
-            memcpy(original, patches[p].original, patches[p].size);
+            // 原始字节取当前进程里的真实内容：表里的 original 携带旧版 rel32 位移，逐字节校验会不符。
+            if (!input.read(address, original, patches[p].size)) {
+                diagnosticStage() = 0x450 + p;
+                return false;
+            }
             memcpy(replacement, patches[p].patched, patches[p].size);
-            for (UInt32 variant = 0; variant < 2; ++variant) {
-                const auto* refs  = variant ? fn.patchedRefs : fn.originalRefs;
-                const auto  count = variant ? fn.patchedCount : fn.originalCount;
-                for (UInt32 r = 0; r < count; ++r) {
-                    if (refs[r].offset + 4 <= loc.offset || refs[r].offset >= loc.offset + patches[p].size) {
+            // 替换字节永远是补丁布局，写入偏移用它；读取内存里的真实位移必须用当前布局（原始或补丁）。
+            const auto* writeRefs = fn.patchedCount ? fn.patchedRefs : fn.originalRefs;
+            const auto  writeCount = fn.patchedCount ? fn.patchedCount : fn.originalCount;
+            const auto* readRefs  = variants[loc.function] ? writeRefs : fn.originalRefs;
+            const auto  readCount = variants[loc.function] ? writeCount : fn.originalCount;
+            {
+                for (UInt32 r = 0; r < writeCount; ++r) {
+                    if (writeRefs[r].offset + 4 <= loc.offset || writeRefs[r].offset >= loc.offset + patches[p].size) {
                         continue;
                     }
+                    UInt32 paired = 0;
                     UInt64 destination;
-                    if (refs[r].offset < loc.offset || refs[r].offset + 4 > loc.offset + patches[p].size
-                        || (refs[r].indirect ?
-                                !observedTarget(input, refs, r, loc.function, functions, addresses, variants,
-                                                destination) :
-                                !target(refs[r], images, ImageCount, functions, addresses, FunctionCount, destination))
-                        || !setRelative(variant ? replacement : original, refs[r].offset - loc.offset, address,
-                                        destination))
+                    UInt8  field[4];
+                    UInt64 actual = 0;
+                    if (writeRefs[r].offset < loc.offset || writeRefs[r].offset + 4 > loc.offset + patches[p].size
+                        || !pairedReference(writeRefs, r, readRefs, readCount, paired)
+                        || readRefs[paired].offset >= fn.size || fn.size - readRefs[paired].offset < 4
+                        || (writeRefs[r].indirect ?
+                                !observedTarget(input, readRefs, paired, addresses[loc.function], destination) :
+                                (!input.read(addresses[loc.function] + readRefs[paired].offset, field, 4)
+                                 || !relativeTarget(addresses[loc.function] + readRefs[paired].offset, 0, field, actual)
+                                 || !resolvedTarget(input, readRefs[paired], actual, images, ImageCount, functions,
+                                                    addresses, FunctionCount, destination, true)))
+                        || !setRelative(replacement, writeRefs[r].offset - loc.offset, address, destination))
                     {
+                        diagnosticStage() = 0x430 + p;
                         return false;
                     }
                 }
@@ -326,6 +445,7 @@ namespace UserCacheResolver
                 if (Range{base + output[j].offset, output[j].size}.contains(address, 1)
                     || Range{address, patches[p].size}.contains(base + output[j].offset, 1))
                 {
+                    diagnosticStage() = 0x440 + p;
                     return false;
                 }
             }

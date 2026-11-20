@@ -47,11 +47,47 @@ static_assert(PatchCount <= 16 && UserSurfaceSyncData::PageCount <= 8);
 static_assert(UserSurfaceSyncData::MaxPatchSize <= 512);
 constexpr UInt32 MaxPageCount = 8;
 
-const UserSurfaceSyncData::Patch* activePatches()
+// 这些缓冲曾直接放在栈上，单个钩子帧最大可达数 KB；缩短内核栈上的占用，避免页错误链
+// （vm_fault_enter → vm_page_push_to_copy → cs_validate_page）在深调用层级上耗尽栈。
+struct SavedRow
 {
-    return computeScratch ?
+    UInt8 bytes[UserSurfaceSyncData::MaxPatchSize];
+};
+struct SavedBuffer
+{
+    SavedRow* rows{nullptr};
+    SavedBuffer() { rows = IONew(SavedRow, PatchCount); }
+    ~SavedBuffer()
+    {
+        if (rows) { IODelete(rows, SavedRow, PatchCount); }
+    }
+};
+struct PlanBuffer
+{
+    UserSurfaceSyncResolver::Plan* plan{nullptr};
+    PlanBuffer() { plan = IONew(UserSurfaceSyncResolver::Plan, 1); }
+    ~PlanBuffer()
+    {
+        if (plan) { IODelete(plan, UserSurfaceSyncResolver::Plan, 1); }
+    }
+};
+
+// 计算 scratch 补丁是 26.0 时代的形状，26.7.3 上只能落在真正需要它的 WindowServer；
+// 其他进程（VT 编解码、媒体分析等）继续用基础补丁集，避免 Metal 计算管线取到不匹配的实现。
+const UserSurfaceSyncData::Patch* activePatches(bool scratch)
+{
+    return scratch ?
                devicePatches->scratch :
                (legacyBlend ? devicePatches->blend : (srdShared ? devicePatches->shared : devicePatches->immediate));
+}
+
+void processName(proc_t process, char* name, size_t size)
+{
+    name[0] = '\0';
+    const auto pid = process != nullptr ? proc_pid(process) : -1;
+    if (pid <= 0) { return; }
+    proc_name(pid, name, static_cast<int>(size));
+    name[size - 1] = '\0';
 }
 
 enum class Stage : UInt32 {
@@ -212,8 +248,7 @@ kern_return_t installSubmitGuard(vm_map_t map, const UInt64 base, bool& fresh)
 }
 
 bool rollback(vm_map_t map, Page* pages, const UInt32 pageCount, const UInt64 base,
-              const UserSurfaceSyncData::Patch* patches,
-              const UInt8 saved[PatchCount][UserSurfaceSyncData::MaxPatchSize], const UInt32 touched)
+              const UserSurfaceSyncData::Patch* patches, const SavedRow* saved, const UInt32 touched)
 {
     using namespace UserSurfaceSyncData;
     bool ok = true;
@@ -226,7 +261,7 @@ bool rollback(vm_map_t map, Page* pages, const UInt32 pageCount, const UInt64 ba
             ok = false;
             continue;
         }
-        if (writeUser(saved[i], address, patches[i].size) != 0) { ok = false; }
+        if (writeUser(saved[i].bytes, address, patches[i].size) != 0) { ok = false; }
     }
     if (!restorePages(map, pages, pageCount)) { ok = false; }
     if (!ok) {
@@ -243,11 +278,16 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
     if (result != 0) { stage(Stage::OriginalError); return result; }
     if (args == nullptr || args->startAddress == 0) { stage(Stage::Argument); return result; }
     using namespace UserSurfaceSyncData;
-    const auto* patches = activePatches();
+    char name[32];
+    processName(process, name, sizeof(name));
+    // scratch 补丁集是 26.0 时代的机器码形状，在 26.7.3 上语义已变（0xBD 的寄存器分配、
+    // 0x32/0xB3 的 RIP 取址都已不同），因此默认关闭，只在显式参数下启用。
+    const bool scratchHere = computeScratch;
+    const auto* patches = activePatches(scratchHere);
     UInt32      patchCount =
         legacyProfile ?
                  legacyProfile->patchCount :
-                 static_cast<UInt32>(computeScratch ? PatchCount : (legacyBlend ? LegacyPatchCount : BaselinePatchCount));
+                 static_cast<UInt32>(scratchHere ? PatchCount : (legacyBlend ? LegacyPatchCount : BaselinePatchCount));
     UserSurfaceSyncData::Patch combined[PatchCount];
     if (legacyProfile) {
         if (patchCount > PatchCount) { return result; }
@@ -271,7 +311,12 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
         return result;
     }
     const bool                    dynamic = !legacyProfile && memcmp(header + 88, CacheUUID, sizeof(CacheUUID)) != 0;
-    UserSurfaceSyncResolver::Plan plan;
+    PlanBuffer planBuffer;
+    if (!planBuffer.plan) {
+        error(KERN_RESOURCE_SHORTAGE);
+        return result;
+    }
+    auto&                         plan = *planBuffer.plan;
     const char* const             uuidKeys[] = {"NRedImmediateSyncCacheUUID0", "NRedImmediateSyncCacheUUID1",
                                                 "NRedImmediateSyncCacheUUID2", "NRedImmediateSyncCacheUUID3"};
     for (UInt32 i = 0; i < 4; ++i) {
@@ -287,7 +332,6 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
             const auto installed = installSubmitGuard(map, base, fresh);
             if (installed == KERN_SUCCESS && fresh) {
                 const auto pid = process != nullptr ? proc_pid(process) : -1;
-                char name[32]{};
                 if (pid > 0) { proc_name(pid, name, sizeof(name)); }
                 name[sizeof(name) - 1] = '\0';
                 if (strcmp(name, "WindowServer") == 0) {
@@ -317,9 +361,15 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
     }
     if (dynamic) {
         if (!UserSurfaceSyncResolver::resolve(readUser, base, *devicePatches, srdShared, legacyBlend, plan,
-                                              computeScratch))
+                                              scratchHere))
         {
             stage(Stage::CacheMismatch);
+            NRed::singleton().setProp32("NRedImmediateSyncDynStep", UserCacheResolver::diagnosticStage());
+            NRed::singleton().setProp32("NRedImmediateSyncDynReason", UserSurfaceSyncResolver::diagnosticReason());
+            NRed::singleton().setProp32("NRedImmediateSyncDynFn", UserCacheResolver::diagnosticFunction());
+            NRed::singleton().setProp32("NRedImmediateSyncDynRef", UserCacheResolver::diagnosticReference());
+            NRed::singleton().setProp32("NRedImmediateSyncDynImg", UserCacheResolver::diagnosticImage());
+            NRed::singleton().setProp32("NRedImmediateSyncDynRelaxed", UserCacheResolver::diagnosticRelaxed());
             NRed::singleton().setProp32("NRedImmediateSyncDynamicRejected", 1);
             return result;
         }
@@ -338,7 +388,7 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
     }
 
     // 禁止在残留另一策略的进程中把旧模式误报为已生效；切换参数仍需重启。
-    if (!legacyProfile && !dynamic && !computeScratch) {
+    if (!legacyProfile && !dynamic && !scratchHere) {
         UInt8 ctx[MaxPatchSize];
         for (UInt32 i = patchCount; i < PatchCount; ++i) {
             const auto& extra = ComputeScratchPatches[i];
@@ -350,7 +400,7 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
         }
     }
     // 旧候选的两处全局 VT 跳转已撤回；不把混合策略误报为新模式已生效。
-    if (computeScratch && !dynamic) {
+    if (scratchHere && !dynamic) {
         for (const auto& withdrawn : WithdrawnTransferGuards) {
             UInt8 bytes[6];
             if (readUser(base + withdrawn.offset, bytes, withdrawn.size) != 0
@@ -361,7 +411,12 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
             }
         }
     }
-    UInt8  saved[PatchCount][MaxPatchSize];
+    SavedBuffer savedBuffer;
+    if (!savedBuffer.rows) {
+        error(KERN_RESOURCE_SHORTAGE);
+        return result;
+    }
+    auto*  saved = savedBuffer.rows;
     Page   pages[MaxPageCount];
     UInt32 pageCount{0}, originals{0}, patched{0};
     for (UInt32 i = 0; i < patchCount; ++i) {
@@ -373,12 +428,12 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
             return result;
         }
         const auto address = base + patches[i].offset;
-        if (readUser(address, saved[i], patches[i].size) != 0) {
+        if (readUser(address, saved[i].bytes, patches[i].size) != 0) {
             stage(Stage::CodeRead);
             return result;
         }
-        if (memcmp(saved[i], patches[i].original, patches[i].size) == 0) { ++originals; }
-        else if (memcmp(saved[i], patches[i].patched, patches[i].size) == 0) {
+        if (memcmp(saved[i].bytes, patches[i].original, patches[i].size) == 0) { ++originals; }
+        else if (memcmp(saved[i].bytes, patches[i].patched, patches[i].size) == 0) {
             ++patched;
         }
         else {
@@ -427,10 +482,9 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
     // 仅记录已完整写入并恢复 RX 的 WindowServer，避免用全局计数代替故障进程证据。
     if (process != nullptr) {
         const auto pid = proc_pid(process);
-        char name[32]{};
         if (pid > 0) { proc_name(pid, name, sizeof(name)); }
         name[sizeof(name) - 1] = '\0';
-        if (computeScratch && strcmp(name, "Weather") == 0) {
+        if (scratchHere && strcmp(name, "Weather") == 0) {
             auto observed = __atomic_load_n(&weatherCount, __ATOMIC_RELAXED);
             while (observed < 4) {
                 if (__atomic_compare_exchange_n(&weatherCount, &observed, observed + 1, false,
@@ -470,7 +524,7 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
             NRed::singleton().setProp32("NRedImmediateSyncApplied", count + 1);
             if (srdShared) { NRed::singleton().setProp32("NRedSrdSharedApplied", count + 1); }
             if (legacyBlend) { NRed::singleton().setProp32("NRedLegacyBlendApplied", count + 1); }
-            if (computeScratch) { NRed::singleton().setProp32("NRedComputeScratchApplied", count + 1); }
+            if (scratchHere) { NRed::singleton().setProp32("NRedComputeScratchApplied", count + 1); }
             SYSLOG("UserSurfaceSync", "ImmediateSync-v1 private Metal initialization patched: count=%u", count + 1);
             break;
         }
@@ -486,7 +540,10 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
     renderRequested = false;
     submitGuard     = checkKernelArgument("-NRedDisplayFix");
     legacyBlend = renderRequested = submitGuard;
-    computeScratch = srdShared = submitGuard && currentKernelVersion().majorMatches(MACOS_26);
+    // scratch 数据只对 26.0 的机器码成立，26.7.3 上会打断 Metal 计算管线，改为显式开启。
+    computeScratch = submitGuard && currentKernelVersion().majorMatches(MACOS_26) &&
+                     checkKernelArgument("-NRedComputeScratch");
+    srdShared = submitGuard && currentKernelVersion().majorMatches(MACOS_26);
     NRed::singleton().setProp32("NRedDisplayFixVersion", 2);
     NRed::singleton().setProp32("NRedSubmitGuardVersion", 1);
     NRed::singleton().setProp32("NRedSubmitGuardRevision", 6);
