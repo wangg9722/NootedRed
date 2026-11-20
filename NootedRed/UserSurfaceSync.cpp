@@ -35,8 +35,6 @@ CopyOut writeUser{nullptr};
 UInt32 seenStages{0}, appliedCount{0}, errorCount{0}, windowServerCount{0}, weatherCount{0};
 UInt32 submitGuardCount{0};
 bool              srdShared{false}, legacyBlend{false}, computeScratch{false}, submitGuard{false};
-// 26.7.x 上只做一处版本无关的闸门补丁：定位构造函数 → 写 2 字节 NOP。
-bool              gateOnly{false};
 bool              renderRequested{false};
 const UserLegacyCompat::Profile*           legacyProfile{nullptr};
 const UserSurfaceSyncData::DevicePatchSet* devicePatches{&UserSurfaceSyncData::DevicePatches[0]};
@@ -273,47 +271,7 @@ bool rollback(vm_map_t map, Page* pages, const UInt32 pageCount, const UInt64 ba
     return ok;
 }
 
-// 闸门模式拆成独立的小栈帧函数：大数组（header/ctx/pages）只在大栈帧版本里出现，
-// 读缓存触发缺页时不会再叠加几 KB 的本地帧。
-[[gnu::noinline]] int gateSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* returnValue)
-{
-    stage(Stage::Called);
-    const auto result = reinterpret_cast<SharedRegionCheck>(originalCheck)(process, args, returnValue);
-    if (result != 0) { return result; }
-    if (args == nullptr || args->startAddress == 0) { return result; }
-
-    static UInt8                      gateOriginal[2]{};
-    static UserSurfaceSyncData::Patch gatePatch[1]{};
-    static UInt8                      gateState{0};    // 0=未解析 1=解析中 2=已解析 3=失败
-    if (gateState == 1 || gateState == 3) { return result; }
-
-    UInt64 base{0};
-    if (readUser(args->startAddress, &base, sizeof(base)) != 0 || base == 0) { return result; }
-    if (gateState == 0) {
-        gateState = 1;
-        if (!UserSurfaceSyncResolver::resolveGate(readUser, base, gateOriginal, gatePatch[0])) {
-            gateState = 3;
-            stage(Stage::CacheMismatch);
-            NRed::singleton().setProp32("NRedGateOnlyRejected", UserSurfaceSyncResolver::diagnosticReason());
-            return result;
-        }
-        gateState = 2;
-        NRed::singleton().setProp32("NRedGateOnlyApplied", 1);
-        NRed::singleton().setProp32("NRedGateOnlyReads", gatePatch[0].offset);
-    }
-    const auto address = base + gatePatch[0].offset;
-    UInt8      current[2];
-    if (readUser(address, current, sizeof(current)) != 0) { return result; }
-    if (memcmp(current, gatePatch[0].original, sizeof(current)) == 0
-        && writeUser(const_cast<UInt8*>(gatePatch[0].patched), address, sizeof(current)) == 0)
-    {
-        NRed::singleton().setProp32("NRedGateOnlyWritten", 1);
-        ++appliedCount;
-    }
-    return result;
-}
-
-[[gnu::noinline]] int fullSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* returnValue)
+int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* returnValue)
 {
     stage(Stage::Called);
     const auto result = reinterpret_cast<SharedRegionCheck>(originalCheck)(process, args, returnValue);
@@ -401,31 +359,7 @@ bool rollback(vm_map_t map, Page* pages, const UInt32 pageCount, const UInt64 ba
         NRed::singleton().setProp32("NRedLegacyBlendRejected", 1);
         return result;
     }
-    if (gateOnly) {
-        // 符号表扫描只做一次：钩子在同一进程里会被反复调用，重复扫描既慢又吃栈。
-        static UInt8                        gateOriginal[2]{};
-        static UserSurfaceSyncData::Patch   gatePatch[1]{};
-        // 0=未解析 1=解析中 2=已解析 3=解析失败：读取缓存本身会触发缺页并重入本钩子，
-        // 不设「解析中」闸门会无限递归，几 KB 的栈瞬间见底 -> double fault。
-        static UInt8                        gateState{0};
-        if (gateState == 1) { return result; }
-        if (gateState == 3) { return result; }
-        if (gateState == 0) {
-            gateState = 1;
-            if (!UserSurfaceSyncResolver::resolveGate(readUser, base, gateOriginal, gatePatch[0])) {
-                gateState = 3;
-                stage(Stage::CacheMismatch);
-                NRed::singleton().setProp32("NRedGateOnlyRejected", UserSurfaceSyncResolver::diagnosticReason());
-                return result;
-            }
-            gateState = 2;
-            NRed::singleton().setProp32("NRedGateOnlyApplied", 1);
-            NRed::singleton().setProp32("NRedGateOnlyReads", gatePatch[0].offset);
-        }
-        patches    = gatePatch;
-        patchCount = 1;
-    }
-    else if (dynamic) {
+    if (dynamic) {
         if (!UserSurfaceSyncResolver::resolve(readUser, base, *devicePatches, srdShared, legacyBlend, plan,
                                               scratchHere))
         {
@@ -454,7 +388,7 @@ bool rollback(vm_map_t map, Page* pages, const UInt32 pageCount, const UInt64 ba
     }
 
     // 禁止在残留另一策略的进程中把旧模式误报为已生效；切换参数仍需重启。
-    if (!gateOnly && !legacyProfile && !dynamic && !scratchHere) {
+    if (!legacyProfile && !dynamic && !scratchHere) {
         UInt8 ctx[MaxPatchSize];
         for (UInt32 i = patchCount; i < PatchCount; ++i) {
             const auto& extra = ComputeScratchPatches[i];
@@ -600,20 +534,12 @@ bool rollback(vm_map_t map, Page* pages, const UInt32 pageCount, const UInt64 ba
 
 } // namespace
 
-int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* returnValue)
-{
-    return gateOnly ? gateSharedRegionCheck(process, args, returnValue)
-                    : fullSharedRegionCheck(process, args, returnValue);
-}
-
 void UserSurfaceSync::init(KernelPatcher& patcher)
 {
     legacyProfile   = UserLegacyData::metal(currentKernelVersion().major());
     renderRequested = false;
-    submitGuard      = checkKernelArgument("-NRedDisplayFix");
-    gateOnly         = checkKernelArgument("-NRedGateOnly");
-    legacyBlend      = submitGuard;
-    renderRequested  = submitGuard || gateOnly;
+    submitGuard     = checkKernelArgument("-NRedDisplayFix");
+    legacyBlend = renderRequested = submitGuard;
     computeScratch = srdShared = submitGuard && currentKernelVersion().majorMatches(MACOS_26);
     NRed::singleton().setProp32("NRedDisplayFixVersion", 2);
     NRed::singleton().setProp32("NRedSubmitGuardVersion", 1);

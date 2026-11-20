@@ -17,7 +17,6 @@ namespace UserSurfaceSyncResolver
     using UserSharedCache::setRelative;
     using UserSharedCache::UserLimit;
     using UserSharedCache::word;
-    using UserSharedCache::wide;
     // 诊断：记录本解析器最后失败的步骤编号。
     inline UInt32& diagnosticReason()
     {
@@ -120,115 +119,13 @@ namespace UserSurfaceSyncResolver
             found, hint);
     }
 
-    // 定点写 8 字节指针的扫描；按 8 字节步进，块之间留一次重叠。
-    inline UInt64 pointerIn(Input& input, const Range& range, UInt64 value, UInt64 skip)
-    {
-        UInt8 chunk[4096];
-        for (UInt64 offset = 0; offset + 8 <= range.size; offset += sizeof(chunk) - 8) {
-            const UInt32 length = range.size - offset < sizeof(chunk) ? static_cast<UInt32>(range.size - offset)
-                                                                       : static_cast<UInt32>(sizeof(chunk));
-            if (!input.read(range.address + offset, chunk, length)) { return 0; }
-            for (UInt32 i = 0; i + 8 <= length; i += 8) {
-                if (wide(chunk + i) == value && range.address + offset + i != skip) {
-                    return range.address + offset + i;
-                }
-            }
-            if (length < sizeof(chunk)) { break; }
-        }
-        return 0;
-    }
-
-    // 只在字节范围内找唯一出现；用于选择器字符串与能力分支。
-    inline UInt64 uniqueBytes(Input& input, const Range& range, const UInt8* bytes, UInt32 size, UInt64& second)
-    {
-        UInt8  chunk[4096];
-        UInt64 first{0};
-        second = 0;
-        for (UInt64 offset = 0; offset + size <= range.size; offset += sizeof(chunk) - size) {
-            const UInt32 length = range.size - offset < sizeof(chunk) ? static_cast<UInt32>(range.size - offset)
-                                                                       : static_cast<UInt32>(sizeof(chunk));
-            if (!input.read(range.address + offset, chunk, length)) { return 0; }
-            for (UInt32 i = 0; i + size <= length; ++i) {
-                if (memcmp(chunk + i, bytes, size) != 0) { continue; }
-                const UInt64 address = range.address + offset + i;
-                if (first == 0) { first = address; }
-                else if (address != first) { second = address; return 0; }
-            }
-            if (length < sizeof(chunk)) { break; }
-        }
-        return first;
-    }
-
-    // 通过 dyld 符号表按方法名定位渲染管线构造函数；不依赖任何一版机器码模板。
-    inline bool constructorFromSelector(Input& input, const Image& image, UInt64& constructor)
-    {
-        static const char name[] =
-            "-[GFX9_MtlRenderPipelineState initWithDevice:pipelineStateDescriptor:vertexVariant:fragmentVariant:]";
-        UInt64 symbol{0};
-        if (!UserSharedCache::symbolAddress(input, image, name, sizeof(name) - 1, symbol)) {
-            diagnosticReason() = 34;
-            return false;
-        }
-        constructor = symbol + image.slide;
-        if (!image.text.contains(constructor, 1)) {
-            diagnosticReason() = 35;
-            return false;
-        }
-        return true;
-    }
-
-    // 只在构造函数体内找唯一的能力分支；命中后写 2 字节 NOP，其余字节一律不动。
-    inline const UInt8* patchedGate()
-    {
-        static const UInt8 bytes[2] = {0x90, 0x90};
-        return bytes;
-    }
-
-    inline bool resolveGate(Reader reader, UInt64 base, UInt8* original, UserSurfaceSyncData::Patch& patch)
-    {
-        Input input{reader, {}};
-        static const char metalPath[] =
-            "/System/Library/Extensions/AMDRadeonX5000MTLDriver.bundle/Contents/MacOS/AMDRadeonX5000MTLDriver";
-        static const UserSharedCache::ImageReference refs[1] = {{metalPath, sizeof(metalPath) - 1}};
-        input.imageRefs  = refs;
-        input.imageCount = 1;
-        input.tableRead  = false;
-        Image image;
-        if (!imageForCache(input, base, image, metalPath, sizeof(metalPath) - 1)) {
-            diagnosticReason() = 30 + UserSharedCache::imageReason();
-            return false;
-        }
-        // 26.7.3 上该闸门位于 image 内固定 RVA；用 16 字节签名做校验，错版就不会落补丁。
-        constexpr UInt64 GateRva = 0x29708;
-        static const UInt8 GateSignature[16] = {0x02, 0x48, 0x8b, 0x9d, 0x70, 0xfe, 0xff, 0xff,
-                                                0x74, 0x28, 0x80, 0xbd, 0x80, 0xfe, 0xff, 0xff};
-        const auto         gateAddress = image.address + GateRva;
-        UInt8              probe[16];
-        if (!image.text.contains(gateAddress, 2) || !input.read(gateAddress - 8, probe, sizeof(probe))
-            || memcmp(probe, GateSignature, sizeof(probe)) != 0)
-        {
-            diagnosticReason() = 37;
-            return false;
-        }
-        original[0] = 0x74;
-        original[1] = 0x28;
-        patch = {gateAddress - base, original, patchedGate(), 2};
-        return true;
-    }
-
     inline bool resolve(Reader reader, UInt64 base, const DevicePatchSet& device, bool shared, bool blend, Plan& plan,
                         bool scratchMode = false)
     {
         Input input{reader, {}};
-        static const char metalPath[] =
-            "/System/Library/Extensions/AMDRadeonX5000MTLDriver.bundle/Contents/MacOS/AMDRadeonX5000MTLDriver";
-        static const UserSharedCache::ImageReference refs[1] = {{metalPath, sizeof(metalPath) - 1}};
-        input.imageRefs  = refs;
-        input.imageCount = 1;
-        input.tableRead  = false;
         Image image;
-        if (!imageForCache(input, base, image, metalPath, sizeof(metalPath) - 1)) {
-            diagnosticReason() = 30 + UserSharedCache::imageReason();
+        if (!imageForCache(input, base, image)) {
+            diagnosticReason() = 1;
             return false;
         }
         // Scratch 与撤回的 VT 策略按完整函数和实际相对引用核验。
