@@ -6,11 +6,11 @@
 // 用于修复「外接显示器音频设备可见但无声」（上游 issue #225）。
 // 思路：AppleGFXHDA 只负责 HDA 控制器侧并喂 DMA，DCN 显示侧的音频管线
 // （DCCG Audio DTO / Azalia endpoint / DIG AFMT / DP_SEC）在 APU 上默认没有被正确配置，
-// 本模块在 framebuffer 上电与链路能力上报这两个事件点把这条管线配起来。
+// 本模块在「framebuffer 上电」「DP 链路重新上电」「音频控制器 probe」这三个既有事件点上
+// 把这条管线配起来；不引入任何定时器、不按固定时长等待，配置失败就等下一个自然事件。
 
 #pragma once
 #include <IOKit/IOTypes.h>
-#include <kern/thread_call.h>
 
 class NRedAudio
 {
@@ -36,40 +36,29 @@ public:
 
     static NRedAudio& singleton();
 
-    // 由 NRed 初始化时调用：读取 -NRedAudioProbe / -NRedAudioApply 决定是否参与。
-    //   -NRedAudioProbe：只做寄存器读取与属性发布，绝不写寄存器（先验证偏移安全）；
-    //   -NRedAudioApply：完整编程（DTO + Azalia + AFMT + DP_SEC）。
-    void init();
+    // 由 NRed 初始化时调用。默认启用，无需任何 boot-arg：
+    //   -NRedNoAudio：整体关闭本模块；
+    //   -NRedAudioProbe：只读诊断模式，发布寄存器快照但绝不写寄存器。
     bool enabled() const;
+    bool probeOnly() const;
 
-    // 事件驱动入口，不启动轮询线程。
+    // 事件驱动入口，全部由既有驱动调用点触发，不启动轮询线程、不做延时重试。
     void onControllerPowerUp();
-    void onLinkCapabilitiesReported();
+    void onDisplayLinkSettled();
 
     // 只读的拓扑快照，写入 IORegistry（NRedAudio* 属性）。
     void probeTopology();
 
     // 事件驱动的 DCN 音频配置（DCCG DTO + Azalia endpoint + AFMT + DP_SEC）。
-    // 外接 framebuffer 已激活但其 DIG 后端尚未使能时返回 false，交由调用方重试。
+    // 外接 framebuffer 尚未激活、或 DIG 后端尚未使能时返回 false（此时只记一个待办属性，
+    // 由下一个自然事件再试，不做定时器轮询）。
     bool configureAudio(bool pulseDpSec = false);
 
 private:
-    thread_call_t delayedProbeCall{nullptr};
-    UInt32        settleRetries{0};
-    bool          postLinkPassDone{false};
-    bool          active{false};
-    bool          probeOnly{false};
+    bool controllerPoweredUp{false};
+    bool externalLinkActive();
 
-    // 写入阶段位（只有对应开关打开才写某一处寄存器，避免一次全写把时钟树/链路写坏）
-    static constexpr UInt32 kStageAz    = 1U << 0;    // Azalia endpoint（AppleGFXHDA 已在写，风险较高）
-    static constexpr UInt32 kStageAfmt  = 1U << 1;    // DIG AFMT（音频信息帧/包使能）
-    static constexpr UInt32 kStageDpSec = 1U << 2;    // DP_SEC（DP 音频安全/流使能）
-    static constexpr UInt32 kStageDto   = 1U << 3;    // DCCG Audio DTO（音频时钟，最危险）
-    static constexpr UInt32 kStageAll   = 0xFU;
+    UInt32 passes{0};
 
-    UInt32      stageMask{0};
-
-    void        scheduleDelayedProbe(UInt32 delayMs = 2000);
-    static void delayedProbeCallback(thread_call_param_t param0, thread_call_param_t param1);
     static auto resolveDcnIpBlock() -> DcnIpBlock;
 };

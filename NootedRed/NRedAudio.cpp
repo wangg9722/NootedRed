@@ -8,7 +8,6 @@
 #include <IOKit/IOService.h>
 #include <NRed.hpp>
 #include <NRedAudio.hpp>
-#include <kern/clock.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/libkern.h>
@@ -198,25 +197,10 @@ namespace
 
 static NRedAudio moduleInstance;
 
-bool NRedAudio::enabled() const { return this->active; }
+// 无状态：每次按 boot-arg 现算，不存在「init 有没有先跑」这种顺序依赖。
+bool NRedAudio::enabled() const { return !checkKernelArgument("-NRedNoAudio"); }
+bool NRedAudio::probeOnly() const { return checkKernelArgument("-NRedAudioProbe"); }
 
-void NRedAudio::init()
-{
-    this->probeOnly = checkKernelArgument("-NRedAudioProbe");
-    if (checkKernelArgument("-NRedAudioApply")) { this->stageMask = kStageAll; }
-    if (checkKernelArgument("-NRedAudioAz")) { this->stageMask |= kStageAz; }
-    if (checkKernelArgument("-NRedAudioAfmt")) { this->stageMask |= kStageAfmt; }
-    if (checkKernelArgument("-NRedAudioDpSec")) { this->stageMask |= kStageDpSec; }
-    if (checkKernelArgument("-NRedAudioDto")) { this->stageMask |= kStageDto; }
-    this->active = this->probeOnly || this->stageMask != 0;
-
-    NRed::singleton().setProp32("NRedAudioMode", this->active ? (this->probeOnly ? 1U : 2U) : 0U);
-    NRed::singleton().setProp32("NRedAudioStage", this->probeOnly ? 0U : this->stageMask);
-    if (this->active) {
-        SYSLOG("NRedAudio", "HDMI/DP audio %s mode, stage mask 0x%X",
-               this->probeOnly ? "probe(read-only)" : "apply", this->stageMask);
-    }
-}
 
 NRedAudio& NRedAudio::singleton() { return moduleInstance; }
 
@@ -255,58 +239,62 @@ auto NRedAudio::resolveDcnIpBlock() -> DcnIpBlock
     return blk;
 }
 
-void NRedAudio::delayedProbeCallback(thread_call_param_t, thread_call_param_t)
-{
-    static constexpr UInt32 kRetryDelaysMs[] = {1000, 1000, 1500, 1500};
-    auto&                   audio            = singleton();
-    const bool              settled          = audio.configureAudio(audio.postLinkPassDone);
-    audio.probeTopology();
-    if (!settled && audio.settleRetries < (sizeof(kRetryDelaysMs) / sizeof(kRetryDelaysMs[0]))) {
-        const UInt32 delayMs = kRetryDelaysMs[audio.settleRetries++];
-        audio.scheduleDelayedProbe(delayMs);
-    } else if (settled && !audio.postLinkPassDone) {
-        // 链路训练结束后 2s 再做一次确认，重新 latch DP_SEC。
-        audio.postLinkPassDone = true;
-        audio.scheduleDelayedProbe(2000);
-    }
-}
-
-void NRedAudio::scheduleDelayedProbe(const UInt32 delayMs)
-{
-    if (this->delayedProbeCall == nullptr) {
-        this->delayedProbeCall = thread_call_allocate(delayedProbeCallback, nullptr);
-    }
-    if (this->delayedProbeCall != nullptr) {
-        uint64_t deadline = 0;
-        clock_interval_to_deadline(delayMs, kMillisecondScale, &deadline);
-        thread_call_enter_delayed(this->delayedProbeCall, deadline);
-    }
-}
-
 void NRedAudio::onControllerPowerUp()
 {
-    if (!this->active) { return; }
-    // framebuffer 上电阶段只发布只读快照：此时链路/时钟尚未稳定，任何写入都可能触发
-    // FullAsicReset（已在 14.8.9 上复现）。真正的配置在 DP 链路能力上报后做。
-    this->probeTopology();
+    if (!this->enabled()) { return; }
+    // 上电阶段不碰任何 MMIO：此刻 DCN 音频 IP 块大概率还没上电，读它要么返回垃圾、
+    // 要么把访问挂在总线上，且本函数处于 GPU 上电链（与 HW 引擎分配同一条链）内。
+    // 这里只记录一个纯内存的状态位，真正的寄存器访问全部推迟到链路上报事件。
+    this->controllerPoweredUp = true;
+    NRed::singleton().setProp32("NRedAudioMode", this->probeOnly() ? 1U : 2U);
+    NRed::singleton().setProp32("NRedAudioPowerUpDone", 1);
 }
 
-void NRedAudio::onLinkCapabilitiesReported()
+bool NRedAudio::externalLinkActive()
 {
-    if (!this->active) { return; }
-    if (this->probeOnly) { this->probeTopology(); return; }
-    this->settleRetries    = 0;
-    this->postLinkPassDone = false;
-    this->probeTopology();
-    this->scheduleDelayedProbe(2000);
+    // 纯 IORegistry 状态判断，不访问任何 MMIO：外接 DP/HDMI framebuffer 已激活且像素时钟非零。
+    auto* match = IOService::serviceMatching("IOFramebuffer");
+    if (match == nullptr) { return false; }
+    bool active{false};
+    if (auto* iter = IOService::getMatchingServices(match)) {
+        while (auto* fb = OSDynamicCast(IOService, iter->getNextObject())) {
+            const UInt32 connType = readPropU32(fb, "connector-type");
+            const bool   ext      = connType == kConnectorDisplayPort || connType == kConnectorHDMI;
+            const bool   clocked  = ext && readPropU32(fb, "IOFBCurrentPixelClock") != 0;
+            OSSafeReleaseNULL(fb);
+            if (clocked) { active = true; break; }
+        }
+        OSSafeReleaseNULL(iter);
+    }
+    OSSafeReleaseNULL(match);
+    return active;
 }
+
+void NRedAudio::onDisplayLinkSettled()
+{
+    if (!this->enabled()) { return; }
+    // 两道状态前置，任一不满足都不碰寄存器：
+    //   1) GPU 侧上电已完成（该函数与 HW 引擎分配同处上电链，不能在链中访问 DCN 音频块）；
+    //   2) 外接链路已定型（外接 fb 的 IOFBCurrentPixelClock 非零）。
+    if (!this->controllerPoweredUp || !this->externalLinkActive()) {
+        NRed::singleton().setProp32("NRedAudioPending", 1);
+        return;
+    }
+    this->probeTopology();
+    if (this->probeOnly()) { return; }
+    (void)this->configureAudio(false);
+}
+
 
 bool NRedAudio::configureAudio(const bool pulseDpSec)
 {
     const auto& nred = NRed::singleton();
-    if (this->probeOnly) { return true; }
+    if (this->probeOnly()) { return true; }
     const auto blk = resolveDcnIpBlock();
-    if (blk.gen == DcnGen::kUnknown || !nred.isMmioReady()) { return true; }
+    if (blk.gen == DcnGen::kUnknown || !nred.isMmioReady()) {
+        nred.setProp32("NRedAudioPending", 1);
+        return false;
+    }
     // 写入前先确认基址可读：整段读到 0xFFFFFFFF 说明 IP 块地址不成立，直接放弃，避免写错寄存器。
     if (nred.readReg32(blk.dccgBase + kDcn21DccgAudioDtoSource) == 0xFFFFFFFFU
         || nred.readReg32(blk.dcnBase + kDcn21DigBeCntl) == 0xFFFFFFFFU)
@@ -360,7 +348,10 @@ bool NRedAudio::configureAudio(const bool pulseDpSec)
         }
     }
 
-    if (!firstExtFb.valid) { return !haveExtConn; }
+    if (!firstExtFb.valid) {
+        if (haveExtConn) { nred.setProp32("NRedAudioPending", 1); return false; }
+        return true;
+    }
 
     // 找第一个已使能的外接 DIG（内屏活跃时跳过 DIG0）。
     UInt32 extDig = 0xFFFFFFFFU;
@@ -372,7 +363,10 @@ bool NRedAudio::configureAudio(const bool pulseDpSec)
             break;
         }
     }
-    if (extDig == 0xFFFFFFFFU) { return false; }
+    if (extDig == 0xFFFFFFFFU) {
+        nred.setProp32("NRedAudioPending", 1);
+        return false;
+    }
 
     // 多台外接显示器时，用 DIG 的 DP_SEC_CNTL 是否为 0 判断该 DIG 走的是 DP 还是 HDMI。
     const UInt32 digOff = extDig * blk.digStride;
@@ -407,26 +401,22 @@ bool NRedAudio::configureAudio(const bool pulseDpSec)
 
     const bool isDP = (extConnType == kConnectorDisplayPort);
 
-    if ((this->stageMask & kStageAz) != 0) { configureAzaliaEndpoint(nred, blk, extEp, isDP); }
+    configureAzaliaEndpoint(nred, blk, extEp, isDP);
 
-    if ((this->stageMask & kStageAfmt) != 0) {
-        if (!afmtActive) {
-            configureAfmt(nred, blk, extDig, extEp);
-        } else if (isDP && (nred.readReg32(blk.dcnBase + kDcn21AfmtPacketCtl2 + digOff) & 0x0000FF00U) == 0) {
-            configureAfmt(nred, blk, extDig, extEp);
-        }
+    if (!afmtActive) {
+        configureAfmt(nred, blk, extDig, extEp);
+    } else if (isDP && (nred.readReg32(blk.dcnBase + kDcn21AfmtPacketCtl2 + digOff) & 0x0000FF00U) == 0) {
+        configureAfmt(nred, blk, extDig, extEp);
     }
 
-    if ((this->stageMask & kStageDto) != 0) {
-        const UInt32 targetMod = extPixClk / 100U;
-        const UInt32 curMod    = nred.readReg32(blk.dccgBase + kDcn21DccgAudioDto0Module);
-        const UInt32 curPhase  = nred.readReg32(blk.dccgBase + kDcn21DccgAudioDto0Phase);
-        if (!afmtActive || curMod != targetMod || curPhase != kDtoPhase24MHz) {
-            programAudioDto(nred, blk, extOtg, extPixClk);
-        }
+    const UInt32 targetMod = extPixClk / 100U;
+    const UInt32 curMod    = nred.readReg32(blk.dccgBase + kDcn21DccgAudioDto0Module);
+    const UInt32 curPhase  = nred.readReg32(blk.dccgBase + kDcn21DccgAudioDto0Phase);
+    if (!afmtActive || curMod != targetMod || curPhase != kDtoPhase24MHz) {
+        programAudioDto(nred, blk, extOtg, extPixClk);
     }
 
-    if (isDP && (this->stageMask & kStageDpSec) != 0) {
+    if (isDP) {
         if (pulseDpSec && (afmtStat & 0x10U) == 0) {
             const UInt32 infoReg = blk.dcnBase + kDcn21AfmtInfoFrame0 + digOff;
             nred.writeReg32(infoReg, nred.readReg32(infoReg) | 0x00000080U);
@@ -439,6 +429,9 @@ bool NRedAudio::configureAudio(const bool pulseDpSec)
     nred.setProp32("NRedAudioCfgDIG", extDig);
     nred.setProp32("NRedAudioCfgOTG", extOtg);
     nred.setProp32("NRedAudioCfgEP", extEp);
+    nred.setProp32("NRedAudioCfgDP", isDP ? 1U : 0U);
+    nred.setProp32("NRedAudioPending", 0);
+    nred.setProp32("NRedAudioPasses", ++this->passes);
     return true;
 }
 

@@ -30,7 +30,6 @@
 #include <Regs/GC.hpp>
 #include <Regs/NBIO.hpp>
 #include <Regs/SMU.hpp>
-#include <NRedAudio.hpp>
 #include <UserSurfaceSync.hpp>
 #include <UserVideoDecode.hpp>
 #include <VCN.hpp>
@@ -68,7 +67,6 @@ void NRed::init()
         {
             singleton().processPatcher();
             UserSurfaceSync::init(patcher);
-            NRedAudio::singleton().init();
             UserVideoDecode::init(patcher);
             DriverInjector::singleton().processPatcher(patcher);
             PenguinWizardry::RuntimeMCManager::singleton().processPatcher(patcher);

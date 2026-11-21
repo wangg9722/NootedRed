@@ -17,6 +17,12 @@
 | [vcn.md](vcn.md) | VCN 接入全景：设备能力表、内核 ABI 核验、用户态补丁、诊断字段含义、HEVC 硬解门（2026-11-26.7.3 实测） |
 | [fairplay-psp-compatibility.md](fairplay-psp-compatibility.md) | FairPlay / PSP 内容保护兼容 |
 
+## 音频（HDMI / DP）
+
+| 文档 | 内容 |
+| --- | --- |
+| [hdmi-dp-audio.md](hdmi-dp-audio.md) | 外接 HDMI/DP 音频：DCN 侧 DTO/Azalia/AFMT/DP_SEC 编程、事件驱动触发点、默认启用与分段开关、诊断属性 |
+
 ## 渲染（Metal / SurfaceSync）
 
 | 文档 | 内容 |

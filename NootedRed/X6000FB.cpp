@@ -238,6 +238,16 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                                             this->orgControllerPowerUp};
         PANIC_COND(!patcher.routeMultiple(id, &request, 1, slide, size), "X6000FB", "Failed to route powerUp");
 
+        // 链路能力上报：登录/DP 重新训练后都会走到。音频只在这里做状态判断+配置，
+        // 且内部先查纯 IORegistry 状态（外接链路是否已定型），不满足就完全不碰寄存器。
+        KernelPatcher::RouteRequest linkInfoReq{
+            "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer27reportCapabilities_LinkInfoEv",
+            wrapReportCapabilitiesLinkInfo, this->orgReportCapabilitiesLinkInfo};
+        if (!patcher.routeMultiple(id, &linkInfoReq, 1, slide, size)) {
+            patcher.clearError();
+            DBGLOG("X6000FB", "reportCapabilities_LinkInfo unavailable; audio relies on HDA probe only");
+        }
+
         const PenguinWizardry::MaskedLookupPatch patches[] = {
             {&kextRadeonX6000Framebuffer, kControllerPowerUpOriginal, kControllerPowerUpOriginalMask,
              kControllerPowerUpReplace, kControllerPowerUpReplaceMask, 1},
@@ -593,13 +603,20 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     return ret;
 }
 
+IOReturn X6000FB::wrapReportCapabilitiesLinkInfo(void* const self)
+{
+    const auto ret = FunctionCast(wrapReportCapabilitiesLinkInfo, singleton().orgReportCapabilitiesLinkInfo)(self);
+    NRedAudio::singleton().onDisplayLinkSettled();
+    return ret;
+}
+
 void X6000FB::wrapDpReceiverPowerCtrl(void* const link, const bool powerOn)
 {
+    // 只做原函数调用：不插任何延时、不做音频寄存器访问。
+    // 本函数位于 DP 链路训练链上，在其中读写 DCN 寄存器会破坏链路建立的时序。
     FunctionCast(wrapDpReceiverPowerCtrl, singleton().orgDpReceiverPowerCtrl)(link, powerOn);
-    IOSleep(250);
-    // DP 链路重新上电/训练后，音频侧需要重新 latch（只在开启音频修复时触发）。
-    if (powerOn && NRedAudio::singleton().enabled()) { NRedAudio::singleton().onLinkCapabilitiesReported(); }
 }
+
 
 void* X6000FB::wrapCreateObjectInfo(void* const helper, const UInt32 tableOffset)
 {

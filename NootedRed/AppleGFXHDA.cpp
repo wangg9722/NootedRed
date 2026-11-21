@@ -4,6 +4,7 @@
 // See LICENSE for details.
 
 #include <AppleGFXHDA.hpp>
+#include <NRedAudio.hpp>
 #include <Headers/kern_iokit.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
@@ -84,6 +85,10 @@ IOService* AppleGFXHDA::wrapProbe(IOService* that, IOService* provider, SInt32* 
     dev->setProperty("hda-gfx", hdaGfxBytes, sizeof(hdaGfxBytes));
 
     DBGLOG("GFXHDA", "Initialised Raven or Renoir device.");
+
+    // 音频侧唯一事件点：本设备（AMD HDMI/DP 音频控制器）真的在这个 iGPU 上 match 成功之后，
+    // 才去配置 DCN 侧音频管线。GPU 上电链与链路上报链上音频零动作。
+    NRedAudio::singleton().onDisplayLinkSettled();
 
     return that;
 }
