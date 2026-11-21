@@ -70,10 +70,28 @@ AMD Cail: GPU HangState 0x00000000, HangFlags 0x00000004
   lldb `br s -a $((镜像基址 + 0x7cc6))`（`VADecoder::Init` 在镜像内偏移 `0x7cc6`）→ 命中时读 `$rdi`。
   注意：`br s -n __ZN9VADecoder4InitEj` 对这个缓存镜像解析不到（符号表对 lldb 不可见），必须按地址下断。
 
-- **实现方式（待落地）**：`VADecoder::Init` 入口处做 code cave——
-  读 `[rdi+0x78]` 若为 5（HEVC）且 `宽 > 4096 || 高 > 2304`，直接 `mov eax,3; ret`（沿用函数内既有的失败返回值 3），
-  否则跳回原入口继续。这样解码会话创建失败 → `VTDecompressionSessionCreate(http)` 得到错误 → 播放器回退软解，
-  VCN 完全不会收到超规格提交。
+- **实现方式（已落地并实测）**：`VADecoder::Init` 入口 24 字节（止于 0x18 指令边界）改为
+  `FF 25 00 00 00 00 <绝对地址>` 跳转，目标是一页由 NRed 在进程内 `vm_allocate` 出来的守卫页：
+  - `[rdi+0x78] == 5`（HEVC）且 `宽 > 4096 || 高 > 2304`（`+0x7c`/`+0x80`）→ `mov eax,3; ret`
+    （沿用 `Init` 内既有的失败返回值，失败路径本来就是 `pop rbx/r14/rbp; ret`，无需清理）；
+  - 其余情况重放原入口 24 字节后跳回 `Init+24`。
+  - 代码：`tools/vad_decode_guard.s` + `tools/build_decoder_guard.py`（生成 `UserDecoderGuardData.hpp`），
+    安装点在 `UserVideoDecode.cpp` 的 `_shared_region_check_np` 钩子里；`-NRedNoDecodeGuard` 可关闭。
+  - 镜像偏移：`AMDRadeonVADriver2` 在缓存内 `0x310B00000`，`Init` 入口 = `base + 0x310B07CC6`。
+
+- **实测结果（macOS 26.7.3 / 249，HEVC 硬解已放开 + 守卫在位）**：
+
+  | 用例 | 结果 |
+  |---|---|
+  | AVC 1080p 60 帧 | 硬解 1，0 挂死 |
+  | HEVC 4K Main10 60 帧 | 硬解 1；三种会话（启用/强制/允许）均 `实际硬解`，0 挂死 |
+  | HEVC 8K（hev1→hvc1）强制硬解 | 失败 -12907 |
+  | HEVC 8K 启用硬解 / 允许软解 | 会话建立但**实际软解**（属性查询 -12900，无硬解会话） |
+  | HEVC 8K 直接解 5 帧 | 软解，0 挂死 |
+  | HEVC 8K IINA 实播 24 秒 | 0 挂死；`VTDecoderXPCService` 371% CPU（软解应有的样子），系统不卡死 |
+
+  结论：超规格会话在驱动侧被拒 → VideoToolbox 回退软解 → VCN 一条超规格提交都收不到，
+  8K 不再拖死全局。动态壁纸/其它 5K+ 源同理走软解。
 
 ## 五、回滚与当前状态
 

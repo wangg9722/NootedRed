@@ -34,13 +34,21 @@ for path in CommandLine.arguments.dropFirst() {
         }
     }
 
-    for (label, spec) in [("强制硬解", [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String: true, kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder as String: true]),
+    for (label, spec) in [("启用硬解", [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String: true]),
+                          ("强制硬解", [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String: true, kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder as String: true]),
                           ("允许软解", [String: Any]())] {
         var s: VTDecompressionSession?
         let dst = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange] as CFDictionary
         let st = VTDecompressionSessionCreate(allocator: nil, formatDescription: fd, decoderSpecification: spec as CFDictionary, imageBufferAttributes: dst, outputCallback: nil, decompressionSessionOut: &s)
-        print("  \(label): \(st == noErr ? "OK" : "失败 \(st)")")
-        if let s = s { VTDecompressionSessionInvalidate(s) }
+        if st == noErr, let s = s {
+            var value: CFTypeRef?
+            let q = VTSessionCopyProperty(s, key: kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, allocator: nil, valueOut: &value)
+            let hw = (q == noErr ? (value as? NSNumber)?.intValue : nil)
+            print("  \(label): OK  实际\(hw == 1 ? "硬解" : hw == 0 ? "软解" : "未知(\(q))")")
+            VTDecompressionSessionInvalidate(s)
+        } else {
+            print("  \(label): 失败 \(st)")
+        }
     }
     print("")
 }
