@@ -353,13 +353,21 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
     }
     // 提交守卫按候选偏移逐字节核验入口，不再依赖缓存 UUID；核验不通过的进程自动跳过。
     if (submitGuard) {
-        if (auto map = getTaskMap(current_task())) {
+        const auto pid = process != nullptr ? proc_pid(process) : -1;
+        // VCN 解码客户端（VideoToolbox 的 XPC 解码服务）不装守卫：它提交的是解码环，
+        // 往里写 PM4 filler 会让 job 的 fence 永不 retire。14.8.9 实测守卫被装进
+        // VTDecoderXPCService 后立刻出现 channel 12 VCN0Dec hung（每 7s 一次 FullAsicReset）。
+        // 守卫的作用域只应该是 GFX 队列，因此这里按客户端身份先把它排掉。
+        const bool decodeClient = strncmp(name, "VTDecoderXPC", 12) == 0
+                                  || strncmp(name, "AppleGVA", 8) == 0
+                                  || strncmp(name, "VTDecoderServic", 15) == 0;
+        if (decodeClient) {
+            NRed::singleton().setProp32("NRedSubmitGuardDecodeSkip", 1);
+            SYSLOG("UserSurfaceSync", "SubmitGuard-v1 skipped for decode client %s (pid %d)", name, pid);
+        } else if (auto map = getTaskMap(current_task())) {
             bool fresh{false};
             const auto installed = installSubmitGuard(map, base, fresh);
             if (installed == KERN_SUCCESS && fresh) {
-                const auto pid = process != nullptr ? proc_pid(process) : -1;
-                if (pid > 0) { proc_name(pid, name, sizeof(name)); }
-                name[sizeof(name) - 1] = '\0';
                 if (strcmp(name, "WindowServer") == 0) {
                     NRed::singleton().setProp32("NRedSubmitGuardWindowServerPID", static_cast<UInt32>(pid));
                     NRed::singleton().setProp32("NRedSubmitGuardWindowServerApplied", 1);
