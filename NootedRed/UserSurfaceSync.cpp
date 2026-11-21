@@ -140,17 +140,44 @@ bool restorePages(vm_map_t map, Page* pages, const UInt32 count)
 // 在进程内分配一页可执行守卫，并把 AMD 命令队列的提交方法入口改为绝对跳转。
 // 守卫把“已用尾..容量尾”的空闲区整段填成 PM4 filler（池复用后尾部常混有旧命令），
 // 随后执行原入口前 15 字节并跳回。
+kern_return_t installSubmitGuardMethod(vm_map_t map, const UInt64 method, bool& fresh);
+
+// 多版本候选：每个候选都必须通过入口 15 字节逐字节核验才安装，核验失败只跳过该候选。
 kern_return_t installSubmitGuard(vm_map_t map, const UInt64 base, bool& fresh)
 {
     using namespace UserSubmitGuardData;
     fresh = false;
-    const auto offset = legacyProfile ? UserLegacyData::submitOffset(legacyProfile->major) : MethodOffset;
-    if (offset == 0 || base >= UserSharedCache::UserLimit || offset >= UserSharedCache::UserLimit - base
-        || MethodPatchSize > UserSharedCache::UserLimit - base - offset)
-    {
-        return KERN_INVALID_ADDRESS;
+    constexpr UInt32 Maximum = OffsetCount > 1 ? OffsetCount : 1;
+    UInt64           offsets[Maximum] = {};
+    UInt32           count{0};
+    if (legacyProfile) {
+        const auto offset = UserLegacyData::submitOffset(legacyProfile->major);
+        offsets[count++] = offset;
+    } else {
+        for (UInt32 i = 0; i < OffsetCount; ++i) { offsets[count++] = Offsets[i]; }
     }
-    const UInt64 method = base + offset;
+    kern_return_t last = KERN_INVALID_ADDRESS;
+    for (UInt32 i = 0; i < count; ++i) {
+        const auto offset = offsets[i];
+        if (offset == 0 || base >= UserSharedCache::UserLimit || offset >= UserSharedCache::UserLimit - base
+            || MethodPatchSize > UserSharedCache::UserLimit - base - offset)
+        {
+            continue;
+        }
+        const auto result = installSubmitGuardMethod(map, base + offset, fresh);
+        if (result == KERN_SUCCESS) {
+            NRed::singleton().setProp32("NRedSubmitGuardOffsetIndex", i);
+            return result;
+        }
+        last = result;
+    }
+    return last;
+}
+
+kern_return_t installSubmitGuardMethod(vm_map_t map, const UInt64 method, bool& fresh)
+{
+    using namespace UserSubmitGuardData;
+    fresh = false;
     UInt8 entry[MethodPatchSize];
     if (readUser(method, entry, sizeof(entry)) != 0) { return KERN_INVALID_ADDRESS; }
     static constexpr UInt8 patchedPrefix[6] = {0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};
@@ -324,9 +351,8 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
         memcpy(&value, header + 88 + i * 4, sizeof(value));
         NRed::singleton().setProp32(uuidKeys[i], value);
     }
-    // 提交守卫不依赖渲染修复模式，但只在缓存与核验偏移一致的进程里安装。
-    const bool knownCache = legacyProfile ? memcmp(header + 88, legacyProfile->uuid, 16) == 0 : !dynamic;
-    if (knownCache && submitGuard) {
+    // 提交守卫按候选偏移逐字节核验入口，不再依赖缓存 UUID；核验不通过的进程自动跳过。
+    if (submitGuard) {
         if (auto map = getTaskMap(current_task())) {
             bool fresh{false};
             const auto installed = installSubmitGuard(map, base, fresh);
@@ -537,7 +563,8 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
 {
     legacyProfile   = UserLegacyData::metal(currentKernelVersion().major());
     renderRequested = false;
-    submitGuard     = checkKernelArgument("-NRedDisplayFix");
+    // -NRedNoSubmitGuard 只关提交守卫，保留显示修复（门与设备设置改写）。
+    submitGuard     = checkKernelArgument("-NRedDisplayFix") && !checkKernelArgument("-NRedNoSubmitGuard");
     legacyBlend = renderRequested = submitGuard;
     // scratch/srdShared 用的是 26.0 时代的机器码形状，在 26.7.x 上语义已变，因此默认关闭，
     // 只有显式 -NRedScratch 才启用；-NRedDisplayFix 只负责门（LegacyBlend）与 SubmitGuard。
