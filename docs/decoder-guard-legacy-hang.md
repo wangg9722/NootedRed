@@ -39,6 +39,10 @@
 
 第一轮就命中：14.8.9 上以 `-NRedNoDecodeGuardLegacy`（守卫不装、其余全部打开）启动后
 
+> **注意（开关已重命名）**：上面的 `-NRedNoDecodeGuardLegacy` 是当时的写法。该开关已随
+> “默认不装守卫”的翻转一起废弃，现在**代码里没有任何地方读它，带上也不会有任何效果**。
+> 当前等价的做法是：什么都不带（默认即不装）；要显式装回来用 `-NRedDecodeGuardLegacy`。
+
 - `NRedVCNEngineAllocated=1`、`NRedVCNUserApplied=16`、`NRedVCNDecoderPID=4058`、
   `NRedVCNX5000ABIValidated=1` / `X6000ABIValidated=1`、`SubmitGuardApplied=16` → 硬解路径完整；
 - 4K HEVC（`hevc_4k60P_main10_10bit_420_eos_r5c_1.mp4`）在 QuickTime/IINA 播放，
