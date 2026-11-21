@@ -20,6 +20,8 @@
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOKitKeys.h>
+#include <IOKit/IORegistryEntry.h>
 #include <IOKit/IOTypes.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <Kexts.hpp>
@@ -191,6 +193,37 @@ void NRed::processPatcher()
     }
 
     DeviceInfo::deleter(devInfo);
+
+    // GL-on-Metal 路由：尽早发布到 iGPU 设备属性上（加速器若读 provider 属性即可命中）
+    this->publishGLBundleName();
+}
+
+void NRed::publishGLBundleName()
+{
+    if (!checkKernelArgument("-NRedGLMetal")) { return; }
+    if (this->iGPU == nullptr) { return; }
+
+    static const char glName[] = "AppleMetalOpenGLRenderer";
+
+    // 1) 设备树/provider 属性：部分 Accelerator 实现启动时读 provider 上的同名属性
+    this->iGPU->setProperty("IOGLBundleName", glName);
+
+    // 2) 覆盖已经发布的 IOAccelerator 服务（GLEngine 真正读取的属性在该服务上）
+    size_t hits = 0;
+    auto   it   = IORegistryIterator::iterateOver(this->iGPU, gIOServicePlane, kIORegistryIterateRecursively);
+    if (it != nullptr) {
+        while (auto svc = OSDynamicCast(IOService, it->getNextObject())) {
+            if (svc->metaCast("IOAccelerator")) {
+                svc->setProperty("IOGLBundleName", glName);
+                hits++;
+            }
+        }
+        it->release();
+    }
+
+    OSString* cur = OSDynamicCast(OSString, this->iGPU->getProperty("IOGLBundleName"));
+    DBGLOG("NRed", "GLMetal: provider=%s accelerators=%zu", cur != nullptr ? cur->getCStringNoCopy() : "?", hits);
+    this->setProp32("NRedGLMetalApplied", static_cast<UInt32>(hits));
 }
 
 void NRed::setProp32(const char* const key, const UInt32 value) const { this->iGPU->setProperty(key, value, 32); }

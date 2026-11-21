@@ -57,6 +57,8 @@ public:
     auto  getFbOffset() const { return fbOffset; }              // TODO: Remove!
 
     void init();
+    // 全局 GL 渲染器路由：-NRedGLMetal 时把 legacy AMDRadeonX5000GLDriver 换成 GL-on-Metal 层。
+    void publishGLBundleName();
     void hwLateInit();        // TODO: Remove!
     void processPatcher();    // TODO: Remove!
 

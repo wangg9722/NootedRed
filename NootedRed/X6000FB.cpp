@@ -585,6 +585,8 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     m_flags       |= 4;    // All framebuffers enabled
     auto ret       = FunctionCast(wrapControllerPowerUp, singleton().orgControllerPowerUp)(self);
     if (send) { singleton().orgMessageAccelerator(self, IOFBRequestControllerEnabled, nullptr, nullptr, nullptr); }
+    // 加速器服务此时已发布，补一次 GL 渲染器路由覆盖
+    NRed::singleton().publishGLBundleName();
     return ret;
 }
 
