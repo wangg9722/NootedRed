@@ -21,6 +21,7 @@
 #include <IOKit/acpi/IOACPIPlatformExpert.h>
 #include <Kexts.hpp>
 #include <NRed.hpp>
+#include <NRedAudio.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
 #include <PenguinWizardry/PatcherPlus.hpp>
 #include <Regs/OSSSYS_4.hpp>
@@ -258,6 +259,17 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
     };
     PANIC_COND(!PenguinWizardry::PatternRouteRequest::routeAll(patcher, id, requests, slide, size), "X6000FB",
                "Failed to route symbols");
+
+    // 可选：外接显示器链路能力上报（DP 热插拔后会再次调用）。缺失时不影响其它补丁。
+    KernelPatcher::RouteRequest linkInfoReq{
+        "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer27reportCapabilities_LinkInfoEv",
+        wrapReportCapabilitiesLinkInfo,
+        this->orgReportCapabilitiesLinkInfo,
+    };
+    if (!patcher.routeMultiple(id, &linkInfoReq, 1, slide, size)) {
+        patcher.clearError();
+        DBGLOG("X6000FB", "reportCapabilities_LinkInfo unavailable; HDMI/DP audio will rely on powerUp only");
+    }
 
     PenguinWizardry::JumpPatternRouteRequest atombiosRequests[] = {
         {"__ZN15AmdAtomVramInfo14createVramInfoEP15AmdAtomFwHelperj", wrapCreateVramInfo, this->orgCreateVramInfo,
@@ -587,6 +599,15 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     if (send) { singleton().orgMessageAccelerator(self, IOFBRequestControllerEnabled, nullptr, nullptr, nullptr); }
     // 加速器服务此时已发布，补一次 GL 渲染器路由覆盖
     NRed::singleton().publishGLBundleName();
+    // framebuffer 已上电：把 DCN 侧音频管线（DTO / Azalia endpoint / AFMT）配起来
+    NRedAudio::singleton().onControllerPowerUp();
+    return ret;
+}
+
+IOReturn X6000FB::wrapReportCapabilitiesLinkInfo(void* const self)
+{
+    const auto ret = FunctionCast(wrapReportCapabilitiesLinkInfo, singleton().orgReportCapabilitiesLinkInfo)(self);
+    NRedAudio::singleton().onLinkCapabilitiesReported();
     return ret;
 }
 

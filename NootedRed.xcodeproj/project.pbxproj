@@ -109,6 +109,8 @@
 		6C1B36672A407C6200B184DD /* AppleGFXHDA.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 6C1B36652A407C6100B184DD /* AppleGFXHDA.hpp */; };
 		CE405ED91E4A080700AA0B3D /* plugin_start.cpp in Sources */ = {isa = PBXBuildFile; fileRef = CE405ED81E4A080700AA0B3D /* plugin_start.cpp */; };
 		CE8DA0832517C41A008C44E8 /* libkmod.a in Frameworks */ = {isa = PBXBuildFile; fileRef = CE8DA0822517C41A008C44E8 /* libkmod.a */; };
+		F1A2B3C4D5E6F708192A0003 /* NRedAudio.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F708192A0001 /* NRedAudio.cpp */; };
+		F1A2B3C4D5E6F708192A0004 /* NRedAudio.hpp in Headers */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F708192A0002 /* NRedAudio.hpp */; };
 		CEA03B5E20EE825A00BA842F /* NRed.cpp in Sources */ = {isa = PBXBuildFile; fileRef = CEA03B5C20EE825A00BA842F /* NRed.cpp */; };
 		CEA03B5F20EE825A00BA842F /* NRed.hpp in Headers */ = {isa = PBXBuildFile; fileRef = CEA03B5D20EE825A00BA842F /* NRed.hpp */; };
 /* End PBXBuildFile section */
@@ -283,6 +285,8 @@
 		6C1B36652A407C6100B184DD /* AppleGFXHDA.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AppleGFXHDA.hpp; sourceTree = "<group>"; };
 		CE405ED81E4A080700AA0B3D /* plugin_start.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = plugin_start.cpp; sourceTree = "<group>"; };
 		CE8DA0822517C41A008C44E8 /* libkmod.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libkmod.a; path = MacKernelSDK/Library/x86_64/libkmod.a; sourceTree = SOURCE_ROOT; };
+		F1A2B3C4D5E6F708192A0001 /* NRedAudio.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = NRedAudio.cpp; sourceTree = "<group>"; };
+		F1A2B3C4D5E6F708192A0002 /* NRedAudio.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NRedAudio.hpp; sourceTree = "<group>"; };
 		CEA03B5C20EE825A00BA842F /* NRed.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = NRed.cpp; sourceTree = "<group>"; };
 		CEA03B5D20EE825A00BA842F /* NRed.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NRed.hpp; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -363,6 +367,8 @@
 				407068662E97CD32004E0761 /* Kexts.hpp */,
 				4068B3B92E97D805007B46BB /* Kexts.cpp */,
 				CEA03B5D20EE825A00BA842F /* NRed.hpp */,
+				F1A2B3C4D5E6F708192A0002 /* NRedAudio.hpp */,
+				F1A2B3C4D5E6F708192A0001 /* NRedAudio.cpp */,
 				CEA03B5C20EE825A00BA842F /* NRed.cpp */,
 				1C748C2C1C21952C0024EED2 /* Plugin.cpp */,
 				40FC5FD829BF995E00367F9D /* X5000.hpp */,
@@ -628,6 +634,7 @@
 				40FC5FDA29BF995E00367F9D /* X5000.hpp in Headers */,
 				4014D9722C74AA7000FDE986 /* ObjectField.hpp in Headers */,
 				4091276D2CE2F681004DBDB5 /* SignalTypes.hpp in Headers */,
+				F1A2B3C4D5E6F708192A0004 /* NRedAudio.hpp in Headers */,
 				CEA03B5F20EE825A00BA842F /* NRed.hpp in Headers */,
 				409127662CE2F2F4004DBDB5 /* PowerPlay.hpp in Headers */,
 				408B3DE52CDFA77800CAE5D2 /* SMUIO.hpp in Headers */,
@@ -800,6 +807,7 @@
 				4059A1132E6DECA600F20858 /* DriverInjector.cpp in Sources */,
 				40FC5FD929BF995E00367F9D /* X5000.cpp in Sources */,
 				40AF79773030BCC00005EFAB /* AmdAtomPspDirectoryDummy.cpp in Sources */,
+				F1A2B3C4D5E6F708192A0003 /* NRedAudio.cpp in Sources */,
 				CEA03B5E20EE825A00BA842F /* NRed.cpp in Sources */,
 				1C748C2D1C21952C0024EED2 /* Plugin.cpp in Sources */,
 				CE405ED91E4A080700AA0B3D /* plugin_start.cpp in Sources */,

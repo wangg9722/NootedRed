@@ -105,5 +105,6 @@ void* AppleGFXHDA::wrapCreateAppleHDAWidget(void* devId)
     if (vendorID == AMDVendorID && (deviceID == RavenHDMIDeviceID || deviceID == RenoirHDMIDeviceID)) {
         return singleton().orgWidget1002AAA0->alloc();
     }
-    return FunctionCast(wrapCreateAppleHDAFunctionGroup, singleton().orgCreateAppleHDAFunctionGroup)(devId);
+    // 注意：这里必须回到 orgCreateAppleHDAWidget，之前误调 FunctionGroup 版本会让非 AMD 走样的路径。
+    return FunctionCast(wrapCreateAppleHDAWidget, singleton().orgCreateAppleHDAWidget)(devId);
 }
