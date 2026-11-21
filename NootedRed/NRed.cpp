@@ -30,6 +30,7 @@
 #include <Regs/GC.hpp>
 #include <Regs/NBIO.hpp>
 #include <Regs/SMU.hpp>
+#include <NRedAudio.hpp>
 #include <UserSurfaceSync.hpp>
 #include <UserVideoDecode.hpp>
 #include <VCN.hpp>
@@ -67,6 +68,7 @@ void NRed::init()
         {
             singleton().processPatcher();
             UserSurfaceSync::init(patcher);
+            NRedAudio::singleton().init();
             UserVideoDecode::init(patcher);
             DriverInjector::singleton().processPatcher(patcher);
             PenguinWizardry::RuntimeMCManager::singleton().processPatcher(patcher);
@@ -230,9 +232,21 @@ void NRed::setProp32(const char* const key, const UInt32 value) const { this->iG
 
 UInt32 NRed::readReg32(const UInt32 reg) const
 {
+    if (!this->isMmioReady()) { return 0xFFFFFFFFu; }
     if ((reg * sizeof(UInt32)) < this->rmmio->getLength()) { return this->rmmioPtr[reg]; }
     else {
         this->rmmioPtr[PCIE_INDEX2] = reg;
         return this->rmmioPtr[PCIE_DATA2];
+    }
+}
+
+void NRed::writeReg32(const UInt32 reg, const UInt32 value) const
+{
+    if (!this->isMmioReady()) { return; }
+
+    if ((reg * sizeof(UInt32)) < this->rmmio->getLength()) { this->rmmioPtr[reg] = value; }
+    else {
+        this->rmmioPtr[PCIE_INDEX2] = reg;
+        this->rmmioPtr[PCIE_DATA2]  = value;
     }
 }
