@@ -37,3 +37,4 @@
 | 文档 | 内容 |
 | --- | --- |
 | [vega-tahoe-r3-test.md](vega-tahoe-r3-test.md) | Vega / Tahoe r3 测试记录 |
+- [hevc-8k-hang-incident.md](hevc-8k-hang-incident.md) — HEVC 8K 提交 VCN 导致挂死/开机死循环的定位、实测数据与「按规格拒绝」方案
