@@ -85,3 +85,48 @@
 5. 26.7.x 的 §三 证据说明"小版本一般只做增量"这一点在**函数布局**上基本成立（ctor 首 32 字节与
    门偏移 `0x101a` 在 26.7.3 依然吻合），漂移主要发生在**绝对地址与预生成机器码数据**上，
    这也是为什么"按内容匹配 + 函数内偏移"是唯一可持续的 26 路径。
+
+## 六、resolver 的硬依赖必须跟着策略开关走
+
+`resolve()` 里每一处 `findFunction()` 都对应一条补丁族。曾经的写法是
+
+```cpp
+if (!scratchMode && !findFunction(..., ScratchOriginal, ...)) { reason = 32; return false; }
+```
+
+意思是"即使不打 scratch 也要先确认 Scratch 函数形状"，作为基线锚点。这条假设在 26.7.x 上不成立：
+`ScratchOriginal`（452 字节，26.0 形状）在 26.7.3 缓存里 14 处字节已经不同，于是整个 resolver 直接
+在 reason 32 退出，**连带 LegacyBlend 的门一条都没打上**（`ioreg` 表现：
+
+```
+NRedImmediateSyncDynamicRejected = 1
+NRedImmediateSyncDynReason = 32
+NRedLegacyBlendApplied = 0
+```
+
+而所有其它检查其实都是通过的）。修法是让这条检查只在 `scratchMode` 下执行，即"某条策略的
+前置匹配只在该策略开启时生效"。修完后同一台机器实测：
+
+```
+NRedLegacyBlendApplied = 16
+NRedLegacyBlendWindowServerApplied = 1
+NRedImmediateSyncDynamicApplied = 1
+```
+
+原则：**补丁族的形状校验属于该补丁族自身，不要拿来当全局前提。** 一个策略关掉时它既不该写字节，
+也不该成为别的策略能否工作的条件。
+
+## 七、装机前的离线自检
+
+`tools/verify_surface_sync_bytes.py` 会把 `UserSurfaceSyncData.hpp` 里的字节数组逐段与目标缓存比对
+（瞬态 rel32 位置豁免），在重启之前回答"resolver 能不能走到打补丁这一步"。26.7.3 上当前结果：
+
+| 补丁点 | 长度 | 结果 |
+|---|---|---|
+| Init(`Original0`) | 215 | 完全一致 |
+| Override(`Original1`) | 10 | 完全一致 |
+| NativeOverride | 923 | 完全一致 |
+| BlendConstructor | 8766 | 57 处差异，在 96 字节差异预算内，前 32 字节严格一致 |
+| Scratch(`ScratchOriginal`) | 452 | 14 处差异，仅 `-NRedScratch` 会因此拒绝 |
+
+凡是出现"整段一致"之外的差异，都要在装机前跑这个脚本，而不是靠重启来验证。

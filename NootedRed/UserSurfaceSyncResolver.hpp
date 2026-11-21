@@ -150,7 +150,10 @@ namespace UserSurfaceSyncResolver
             diagnosticReason() = 31;
             return false;
         }
-        if (!scratchMode
+        // Scratch 函数只属于 -NRedScratch 策略；非 scratch 模式下它的 26.0 形状在 26.7.x 已不成立，
+        // 曾经因为在这里强制匹配而让整条 resolver 直接放弃（NRedImmediateSyncDynReason=32），
+        // 连带 LegacyBlend 的门也一条都没打上。
+        if (scratchMode
             && !findFunction(input, image.text, ScratchOriginal, sizeof(ScratchOriginal), scratch, false,
                              image.address + ScratchRVA))
         {
