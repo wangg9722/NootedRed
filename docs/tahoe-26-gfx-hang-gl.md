@@ -1,57 +1,65 @@
-# macOS 26.4：channel GFX 反复挂死 / 轻微花屏（legacy GL 未路由到 Metal）
+# macOS 26.4：channel GFX 反复挂死 / 轻微花屏（显示修复未安装）
 
-## 现象（work1，macOS 26.4 / 25E246，Cezanne 1002:1638）
+## 现象（work1，macOS 26.4 / 25E246，Cezanne `1002:1638`）
 
-- 能进桌面，日常操作可用。
-- Chrome 打开网页时出现**很小范围的画面异常（花屏块）**，随后整页明显卡顿，等 1~2 秒自动恢复。
-- 偶发一次操作后系统卡一会儿，不重启也能自己缓过来。
+- 能进桌面、日常可用；Chrome 打开网页时出现很小范围的花屏块，随后页面卡 1~2 秒自行恢复。
+- 每次卡顿都对应一次 `PerEngineReset`。
 
-## 日志证据
+## 一开始的错误判断（保留作为教训）
 
-`log show --last 6h | grep -E "is hung|GPURestartBegin|PerEngineReset"`：
-
-```
-channel 24 GFX event timeout; pending stamps [3504..3569]
-HW Channel 0 GFX is occupied by channel 24 stamp 3504
-channel 24 GFX is hung! (lastReadTimestamp=0x00000daf)
-IOAccelEventMachine2::restart_channel(): GPURestartBegin stampIdx=24 type=2
-GPU HangState 0x0000000e, HangFlags 0x00000005:
-  IndividualEngineHang 1, NonEngineBlockHang 0, FenceNotRetired 1,
-  PerEngineReset 1, FullAsicReset 0
-```
-
-- 24 小时统计：`channel 24 GFX is hung` × **13**，全部是 GFX，**没有一条 VCN（解码）挂死**。
-- 对照组 249（macOS 26.7.3，同一份 kext，boot-args 含 `-NRedGLMetal`）：24 小时 **0 次**。
-
-## 排除项
-
-- **不是解码**：解码守卫在位且生效（`NRedDecodeGuardRejected = 4`，说明 4 次超规格 HEVC 会话被拒、回退软解），VCN 通道零挂死。
-- **不是 26.4 与 26.7.3 的版本差异**：两机 kext 二进制相同（md5 `72644996…`），唯一系统性差异是 work1 的 boot-args **缺 `-NRedGLMetal`**。
+work1 的 boot-args 缺 `-NRedGLMetal`，而 249 有，24h 挂死数 0 vs 13，于是先按
+[GL 路由](gl-metal-routing.md)处理。补上 `-NRedGLMetal` 后（`NRedGLMetalApplied=2`、
+`IOGLBundleName=AppleMetalOpenGLRenderer`）**挂死没有减少**：WebGL 压测 60 秒仍 12 次。
+说明本条故障与 legacy GL 无关；对照组差异是**系统小版本**（26.7.3 vs 26.4），不是参数。
 
 ## 根因
 
-work1 上 `IOGLBundleName` 仍是 `AMDRadeonX5000GLDriver`（legacy GL），而 249 已被 NRed 改成
-`AppleMetalOpenGLRenderer`（`NRedGLMetalApplied = 2`）。
+`-NRedDisplayFix` 的显示修复（`ImmediateSync` 的设备设置初始化改写 + `LegacyBlend` 门）
+在 26 上走"缓存 UUID 已知"或"动态解析"两条路。26.4 的缓存 UUID
+（`3291C199-4BF9-3866-AB8D-71C8CA1CA31A`）与参考版本不同，进入动态解析；
+解析器在 `BlendConstructor` 一步失败（`NRedImmediateSyncDynReason=33`），
+而它是全有或全无的，于是**四个补丁点一个都没写**：
 
-legacy GL 提交在 Cezanne 上会占住 HW Channel 0 GFX 且 fence 不退役 →
-`checkGPUProgress` 判定超时 → 触发 `PerEngineReset`（只重置引擎、不重启整机）。
-重置瞬间该通道上未完成的绘制丢失，表现为**小面积花屏**；重置 + 语义重建期间页面卡顿 1~2 秒，
-之后通道恢复，所以"会自己缓过来"。
+| 属性 | 249 (26.7.3) | work1 修复前 |
+| --- | --- | --- |
+| `NRedLegacyBlendApplied` | 16 | 缺失 |
+| `NRedLegacyBlendWindowServerApplied` | 1 | 缺失 |
+| `NRedImmediateSyncWindowServerApplied` | 1 | 缺失 |
 
-当前 work1 上仍映射 legacy GLDriver 的进程：`uTools`（Electron 的 GL 客户端），
-与当初优酷挂死属同一类触发者。
+失败的直接原因是差异预算：参考构造函数 8766 字节，26.4 上"计数差异" **116 处**，
+超过 resolver 的 96 预算。差异不是语义变化，而是编译器把一批 `REX` 前缀换成了等价的
+`VEX` 前缀（例如 `44 fa 30 31` ↔ `c4 fa 30 31`），指令语义相同。
+门本身在 26.4 上位置与字节都正常：`ctor+0x101A` = `74 28`、`ctor+0x103C` = `0F 94 C1`
+（`tools/blend_gate_probe.py` 实测），镜像布局整体只平移了 `0x156000`。
 
-## 处置
+## 修复（同一份 kext 支持多个小版本）
 
-在 work1 的 `config.plist` boot-args 追加 `-NRedGLMetal`（已备份 `config.plist.bak-gfxhang-*`，
-`plutil -lint` 通过），重启后生效。验证判据：
+`NootedRed/UserSurfaceSyncResolver.hpp` 增加第二档匹配 `findConstructorWide()`：
 
-1. `NRedGLMetalApplied` > 0，`IOGLBundleName = AppleMetalOpenGLRenderer`；
-2. `channel .* GFX is hung` 计数在 Chrome / Electron 正常使用下保持 0；
-3. `NRedDecodeGuardOffsetIndex` 仍命中（26 系列为 0），解码守卫不受影响。
+1. 仍然要求前 32 字节严格一致（仅豁免位移字节）；
+2. 差异预算放宽到 256（覆盖 26.4 的 116）；
+3. **额外要求** `ctor+BlendGateInConstructor` 必须等于 `BlendGateOriginal`（`74 28`）、
+   `ctor+BlendAllowInConstructor` 必须等于 `BlendAllowOriginal`（`0F 94 C1`）；
+4. 仍要求全文本唯一命中。
 
-## 备注
+先按原预算 96 匹配，失败才走这条回退，因此 26.7.x 的路径与代价不变；命中时置
+`NRedImmediateSyncDynRelaxed=1` 作为现场证据。写入阶段原有的逐点 original 字节比对
+（不符即 `CodeMismatch` 中止）保持不变，误匹配不会被写进进程。
 
-- `PerEngineReset=1 / FullAsicReset=0` 是"能自己恢复"的关键，和 8K 解码挂死（`channel 12 VCN0Dec`，
-  且会拖死 WindowServer）不是同一类故障。
-- macOS 14 分区的"进桌面即卡死"是独立问题，见其他文档；不要与本次 GFX 挂死混为一谈。
+## 实测（work1，macOS 26.4，重启 + `-NRedDisplayFix -NRedVideoFix -NRedGLMetal`）
+
+| 项 | 结果 |
+| --- | --- |
+| `NRedLegacyBlendApplied` / `WindowServerApplied` | 16 / 1（WindowServer pid 197） |
+| `NRedImmediateSyncWindowServerApplied` | 1 |
+| `NRedImmediateSyncDynRelaxed` | 1 |
+| 开机至今 `GFX is hung` | 0 |
+| Chrome WebGL（aquarium）压测 60 秒 | 挂死 0（修复前同脚本 12 次） |
+
+## 仍然存在、未处理
+
+- SubmitGuard 未安装（work1 与 249 都没有 `NRedSubmitGuardApplied`）：
+  `UserSubmitGuardData::MethodOffset`（`0x310CE7240`）在当前缓存里已不对应
+  `MethodOriginal` 的 15 字节，`tools/build_submit_guard.py` 在 26.4 上直接拒绝生成。
+  这台机器上的实际修复来自 `LegacyBlend` + 设备设置改写，SubmitGuard 属独立缺口。
+- macOS 14 分区"进桌面即卡死"是另一个问题，见 `version-selection-matrix.md`。

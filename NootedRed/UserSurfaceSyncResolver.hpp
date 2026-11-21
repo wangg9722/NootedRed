@@ -123,6 +123,38 @@ namespace UserSurfaceSyncResolver
             found, hint);
     }
 
+    // 26.x 各小版本之间，构造函数除了常量池与 RIP 位移，还会出现整条指令的编码差异
+    // （REX 前缀改成等价的 VEX 前缀）。参考预算 96 对 macOS 26.4 的 116 处差异不够，
+    // 整条 resolver 会因此放弃，连带门补丁一条都打不上。
+    // 这里给第二档：放宽到 256 处，但要求门与 allow 两个锚点字节完全一致，且全文本唯一命中；
+    // 写入阶段仍逐条比对 original 字节，锚点不符就会在 CodeMismatch 处停下。
+    inline bool findConstructorWide(Input& input, const Range& text, UInt64& found)
+    {
+        return UserCacheResolver::scanFunction(
+            input, text, sizeof(BlendConstructor), 32,
+            [&](const UInt8* bytes)
+            {
+                for (UInt32 i = 0; i < 32; ++i) {
+                    if (bytes[i] != BlendConstructor[i]
+                        && !displacementByte(BlendConstructor, i, sizeof(BlendConstructor)))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            },
+            [&](UInt64 address)
+            {
+                if (!similar(input, address, BlendConstructor, sizeof(BlendConstructor), 256)) { return false; }
+                UInt8 gate[sizeof(BlendGateOriginal)], allow[sizeof(BlendAllowOriginal)];
+                return input.read(address + BlendGateInConstructor, gate, sizeof(gate))
+                       && memcmp(gate, BlendGateOriginal, sizeof(gate)) == 0
+                       && input.read(address + BlendAllowInConstructor, allow, sizeof(allow))
+                       && memcmp(allow, BlendAllowOriginal, sizeof(allow)) == 0;
+            },
+            found);
+    }
+
     inline bool resolve(Reader reader, UInt64 base, const DevicePatchSet& device, bool shared, bool blend, Plan& plan,
                         bool scratchMode = false)
     {
@@ -163,8 +195,11 @@ namespace UserSurfaceSyncResolver
         if (!findFunction(input, image.text, BlendConstructor, sizeof(BlendConstructor), constructor, true,
                           image.address + ConstructorRVA, 96))
         {
-            diagnosticReason() = 33;
-            return false;
+            if (!findConstructorWide(input, image.text, constructor)) {
+                diagnosticReason() = 33;
+                return false;
+            }
+            UserCacheResolver::diagnosticRelaxed() = 1;
         }
         const UInt8*         variants[] = {Original0, device.immediate[0].patched, device.shared[0].patched};
         const RelativeField* links[]    = {OriginalInitLinks, ImmediateInitLinks, SharedInitLinks};
