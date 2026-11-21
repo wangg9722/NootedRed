@@ -13,13 +13,13 @@ from cache_resolver_data import ResolverData
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "build/vcn"
-GVA_CHOICE_ADDRESS = 0x7FFA0C59BBAC
+GVA_CHOICE_ADDRESS = 0x7FFA0C59FBAC
 GVA_CHOICE_SIZE = 1136
-GVA_CHOICE_SHA256 = "b7c725552045a9db206ab2eed4edda7ea3d27a29de2feee782204c362764a33d"
+GVA_CHOICE_SHA256 = "80bf909e5d6e2a72db1b4f6ff30cc517828ab4cf7801873efd56e52ec2f6a289"
 HASHES = {
     "__ZN11VACPFactory8createCPEP11_VAHWConfigP11VAIOConnectPP4VACp":
         "e63a2259ad470bd088d623edc778be34f9f6630fc6156bf6cac808c381b15aa6",
-    "__ZN17VAAcceleratorInfo8identifyEjj": "d7c579bce55c5724ec241f7f9abece9d0f23b1c30178d2f539fc0cabf41dc0bd",
+    "__ZN17VAAcceleratorInfo8identifyEjj": "75d8727f3aaa4c61b001794812a84090a7e847c4f9cad3a4bd0318ede6a1bdee",
     "__ZN18VAAddrLibInterface4initEP11VAIOConnectP13sHardwareInfo":
         "b35bd96d6ca0b8bd9047af67fc3f0f77ef09242f684c65e17d4cee062af155ea",
     "__ZN4Addr2V27Gfx9Lib20HwlConvertChipFamilyEjj":
@@ -45,6 +45,8 @@ HASHES = {
         "1c3726a90b3e8f1d320700b05d3bf6cf9c7f49bd4afae0a2aac1cb44aaaaf038",
     "__ZN11Vcn2Encoder15setEncodeParamsEPvP15VAVendorTexture":
         "c8193ea2d2c7193012a5618b6918d41fffe30ad0c1389256fee983e66ac24347",
+    "__ZN9VAFactory13createDecoderEiP9VAContext":
+        "ecd7b5890e07b9c501ca9d87100691c0cca4b48f45f711195ba4de2241f138d1",
 }
 # 短 getter 需要至少 32 字节锚点；两个编码器的 pitch 函数完全相同，需要相邻完整函数区分。
 # 相邻函数仅参与完整匹配和重定位核验，不修改其字节。
@@ -211,6 +213,15 @@ def main():
             "movl 0x80(%rdx), %eax\nmovl 0x84(%rdx), %ecx\nxorl %edx, %edx\ndivl %ecx\n"
             "movl %eax, 0x18(%rbx)\nshrl %eax\nmovl %eax, 0x1c(%rbx)\n.org 37, 0x90\n", "encode-pitch")
         add(name, address + 0x31, code[0x31:0x56], pitch)
+        # VCN2 桥接的 HEVC 硬件解码不可用（帧级 kVTVideoDecoderMalfunctionErr，长流会把
+        # VCN0Dec 引擎挂死触发 GPU Reset + WindowServer watchdog）；AV1 在 VCN2.2 上本无硬件。
+        # codec 枚举与 createDecodeDataProcessor 一致：0=AVC 1=VC1 2=MPEG2 3=MPEG2VLD 4=JPEG 5=HEVC 6=AV1。
+        # 头部 cmp esi,6 / ja rel32 拒绝 7 以上；改成 cmp esi,5 / jae rel32 让 HEVC 与 AV1
+        # 走同一"返回空解码器"出口，GVA 失败后 VideoToolbox 自动回退软件解码，H.264 硬解保留。
+        name = "__ZN9VAFactory13createDecoderEiP9VAContext"
+        address, code = function(name)
+        assert code[0x07:0x10] == bytes.fromhex("83fe060f87a5000000"), "createDecoder 头部与 26.7.3 核验不符"
+        add(name, address + 0x07, code[0x07:0x10], bytes.fromhex("83fe050f83a5000000"), fairplay_decode=True)
         code_section = next(s for s in sections if s[0] == "__text")
         text = cache.read(code_section[1], code_section[2])
         for old, new in [(0x2220221, 0x2020201), (0x6660661, 0x6060601)]:

@@ -117,3 +117,23 @@ Apple TV 在线观看的密钥请求及系统网络／音频 panic 需要独立�
 验收使用 `-NRedVideoFix`，记录 CPU/PCI、`sw_vers`、`uname -r`、诊断字段及解码器的
 `UsingHardwareAcceleratedVideoDecoder` 属性，并对 H.264/HEVC 输出与软件解码做像素比较。
 保留可启动的 EFI；发生异常时恢复旧 kext、移除 `-NRedVideoFix` 并重启。
+
+## HEVC 硬件解码门（2026-11-21，26.7.3 实测结论）
+
+VCN2 桥接在 Cezanne（`1002:1638`，VCN 2.2）上经 `VTDecompressionSession` 逐帧验证：
+H.264 全部正常；HEVC（8bit 与 10bit）稳定出现 `kVTVideoDecoderMalfunctionErr`，
+长时间播放（优酷等 Electron + VideoToolbox 应用）会把 VCN0Dec 引擎挂死，
+触发 GPU Reset 与 WindowServer watchdog。这是 VCN 桥接自身未完成的部分，非渲染侧回归。
+
+处理方式：在 `AMDRadeonVADriver2` 的 `VAFactory::createDecoder(codec, ctx)` 头部
+（`cmp esi,6 / ja rel32`）改为 `cmp esi,5 / jae rel32`，令 HEVC(5) 与 AV1(6)
+走"返回空解码器"出口。codec 枚举与 `createDecodeDataProcessor` 一致：
+0=AVC 1=VC1 2=MPEG2 3=MPEG2VLD 4=JPEG 5=HEVC 6=AV1。GVA 创建失败后
+VideoToolbox 自动回退系统软件 HEVC 解码；H.264 硬解不受影响。
+该补丁由 `tools/build_video_decode_patch.py` 生成，进入 FairPlay 解码掩码，全局生效、
+与进程无关。
+
+生成器参考基准同步更新为 26.7.3（25G342）缓存：AppleGVA 选择函数
+`GVA_CHOICE_ADDRESS` 平移至 `0x7FFA0C59FBAC`（+0x4000，同 RVA `0x23BAC`），
+`identify` 哈希因 RIP 相对位移更新；其余 16 个锚点函数哈希与 26.7.3 完全一致。
+装机前用 `tools/verify_video.py` 对全部补丁做 original 字节核验。
