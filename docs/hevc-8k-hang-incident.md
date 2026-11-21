@@ -93,6 +93,22 @@ AMD Cail: GPU HangState 0x00000000, HangFlags 0x00000004
   结论：超规格会话在驱动侧被拒 → VideoToolbox 回退软解 → VCN 一条超规格提交都收不到，
   8K 不再拖死全局。动态壁纸/其它 5K+ 源同理走软解。
 
+## 四·五、同一份 kext 支持多版本
+
+各版本 dyld 缓存里 `AMDRadeonVADriver2` 的位置不同，但 `VADecoder::Init` 入口前 24 字节的**机器码完全一致**
+（`push rbp; mov rbp,rsp; push r14; push rbx; mov [rdi+0x128],esi; mov qword [rdi+0xf0],0`），
+所以守卫只需一份 payload，偏移做成候选表即可，不分版本出两份代码：
+
+| 系统 | 缓存内 `Init` 入口偏移 |
+|---|---|
+| macOS 26.7.3 / 25G342 | `0x310B07CC6` |
+| macOS 14.8.9 / 23J631 | `0x30339FFA4` |
+
+安装时逐个候选读入口 24 字节，只有与该表 `EntryOriginal` 完全一致的那个才落地，
+其余候选、以及入口已被改成别的跳转的进程，都直接跳过。因此：
+不支持的系统版本 = 守卫静默不装（保持原行为），不会误改任何代码。
+`NRedDecodeGuardOffsetIndex` 记录命中的是第几个候选（0 = 26，1 = 14）。
+
 ## 五、回滚与当前状态
 
 - 已回滚：ESP `/EFI/OC/Kexts/NootedRed.kext` → `2b275a0e1d72a78cb0b3ab698b62a9cd`（带 HEVC 门的稳定版）；
