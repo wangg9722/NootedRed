@@ -7,6 +7,7 @@
 #include <UserPatchMemory.hpp>
 #include <UserPatchPolicy.hpp>
 #include <UserVideoDecode.hpp>
+#include <UserDecoderGuardData.hpp>
 #include <UserVideoDecodeData.hpp>
 #include <UserVideoDecodeResolver.hpp>
 #include <VCN.hpp>
@@ -38,6 +39,8 @@ namespace
     CopyOut                           writeUser{nullptr};
     UInt32                            seenStages{0}, appliedCount{0}, errorCount{0};
     bool                              fairPlayDriverOnly{false};
+    bool                              decodeGuard{true};
+    UInt32                            decodeGuardApplied{0}, decodeGuardRejected{0};
     const UserVideoDecodeData::Patch* devicePatches{nullptr};
     const UserLegacyCompat::Profile*  legacyProfile{nullptr};
     constexpr auto                    PatchCount   = arrsize(UserVideoDecodeData::Patches);
@@ -105,6 +108,94 @@ namespace
     bool restorePages(vm_map_t map, Page* pages, const UInt32 count)
     {
         return UserPatchMemory::restorePages(map, pages, count, error);
+    }
+
+    // 在进程内分配一页可执行守卫，把 AMDRadeonVADriver2 的 VADecoder::Init 入口改为绝对跳转。
+    // 守卫按会话规格拒绝超规格 HEVC 硬解（宽 > 4096 或 高 > 2304），让播放器回退软解，
+    // VCN 因此收不到超出自身能力的提交。入口 24 字节由守卫原样重放后跳回。
+    kern_return_t installDecodeGuard(vm_map_t map, const UInt64 base, bool& fresh)
+    {
+        using namespace UserDecoderGuardData;
+        fresh = false;
+        if (base >= UserSharedCache::UserLimit || CacheOffset >= UserSharedCache::UserLimit - base
+            || PatchSize > UserSharedCache::UserLimit - base - CacheOffset)
+        {
+            return KERN_INVALID_ADDRESS;
+        }
+        const UInt64 entry     = base + CacheOffset;
+        const UInt64 entryPage = entry & ~static_cast<UInt64>(PAGE_SIZE - 1);
+        UInt8        current[PatchSize];
+        if (readUser(entry, current, sizeof(current)) != 0) { return KERN_INVALID_ADDRESS; }
+        static constexpr UInt8 patchedPrefix[6] = {0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};
+        const UInt64           continuation     = entry + PatchSize;
+        if (memcmp(current, patchedPrefix, sizeof(patchedPrefix)) == 0) {
+            UInt64 target{0};
+            memcpy(&target, current + 6, sizeof(target));
+            if (target == 0 || (target & (PAGE_SIZE - 1)) != 0
+                || target >= UserSharedCache::UserLimit - sizeof(Payload))
+            {
+                return KERN_INVALID_ARGUMENT;
+            }
+            UInt8 existing[sizeof(Payload)], expected[sizeof(Payload)];
+            memcpy(expected, Payload, sizeof(expected));
+            memcpy(expected + PayloadJumpOffset, &continuation, sizeof(continuation));
+            vm_prot_t protection{VM_PROT_NONE};
+            return readUser(target, existing, sizeof(existing)) == 0
+                           && memcmp(existing, expected, sizeof(existing)) == 0 && leafProtection(map, target, protection)
+                           && protection == (VM_PROT_READ | VM_PROT_EXECUTE) ?
+                       KERN_SUCCESS :
+                       KERN_INVALID_ARGUMENT;
+        }
+        if (memcmp(current, EntryOriginal, sizeof(current)) != 0) { return KERN_INVALID_ARGUMENT; }
+        vm_prot_t protection{VM_PROT_NONE};
+        if ((entry & (PAGE_SIZE - 1)) + sizeof(current) > PAGE_SIZE || !leafProtection(map, entryPage, protection)
+            || protection != (VM_PROT_READ | VM_PROT_EXECUTE))
+        {
+            return KERN_PROTECTION_FAILURE;
+        }
+
+        vm_address_t page{0};
+        auto         result = vm_allocate(map, &page, PAGE_SIZE, VM_FLAGS_ANYWHERE);
+        if (result != KERN_SUCCESS) { return result; }
+
+        UInt8 payload[sizeof(Payload)];
+        memcpy(payload, Payload, sizeof(payload));
+        memcpy(payload + PayloadJumpOffset, &continuation, sizeof(continuation));
+        if (writeUser(payload, page, sizeof(payload)) != 0) {
+            vm_deallocate(map, page, PAGE_SIZE);
+            return KERN_FAILURE;
+        }
+        result = vm_protect(map, page, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+        if (result == KERN_SUCCESS) { result = vm_protect(map, page, PAGE_SIZE, TRUE, VM_PROT_READ | VM_PROT_EXECUTE); }
+        if (result != KERN_SUCCESS) {
+            vm_deallocate(map, page, PAGE_SIZE);
+            return result;
+        }
+
+        // FF 25 00 00 00 00 <绝对目标>：14 字节，其余补 NOP。
+        UInt8 patch[PatchSize];
+        memset(patch, 0x90, sizeof(patch));
+        memcpy(patch, patchedPrefix, sizeof(patchedPrefix));
+        const UInt64 target = page;
+        memcpy(patch + 6, &target, sizeof(target));
+
+        result = vm_protect(map, entryPage, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+        if (result != KERN_SUCCESS) {
+            vm_deallocate(map, page, PAGE_SIZE);
+            return result;
+        }
+        const auto written = writeUser(patch, entry, sizeof(patch));
+        bool       rolledBack = false;
+        if (written != 0) { rolledBack = writeUser(current, entry, sizeof(current)) == 0; }
+        auto restored = vm_protect(map, entryPage, PAGE_SIZE, FALSE, protection);
+        if (restored == KERN_SUCCESS) { restored = vm_protect(map, entryPage, PAGE_SIZE, TRUE, protection); }
+        if (written != 0 || restored != KERN_SUCCESS) {
+            if (rolledBack) { vm_deallocate(map, page, PAGE_SIZE); }
+            return written != 0 ? KERN_FAILURE : restored;
+        }
+        fresh = true;
+        NRed::singleton().setProp32("NRedDecodeGuardRevision", 1);
+        return KERN_SUCCESS;
     }
 
     struct SavedRow
@@ -242,6 +333,27 @@ namespace
         if (memcmp(header, CacheMagic, sizeof(CacheMagic)) != 0) {
             stage(Stage::CacheMismatch, fairPlayPID);
             return result;
+        }
+        // 解码规格守卫独立于渲染修复与 FairPlay 权限：只要缓存与镜像对得上就在本进程装一次。
+        if (decodeGuard) {
+            if (auto map = getTaskMap(current_task())) {
+                bool       fresh{false};
+                const auto installed = installDecodeGuard(map, base, fresh);
+                if (installed == KERN_SUCCESS) {
+                    if (fresh) {
+                        const auto count = __atomic_fetch_add(&decodeGuardApplied, 1U, __ATOMIC_RELAXED);
+                        if (count < 16) { NRed::singleton().setProp32("NRedDecodeGuardApplied", count + 1); }
+                        SYSLOG("UserVideoDecode", "decode guard installed in pid %d",
+                               process != nullptr ? proc_pid(process) : -1);
+                    }
+                } else {
+                    const auto count = __atomic_fetch_add(&decodeGuardRejected, 1U, __ATOMIC_RELAXED);
+                    if (count < 8) {
+                        NRed::singleton().setProp32("NRedDecodeGuardRejected", static_cast<UInt32>(installed));
+                        SYSLOG("UserVideoDecode", "decode guard rejected: error=0x%X", installed);
+                    }
+                }
+            }
         }
 
         if (fairPlayDecode) {
@@ -398,6 +510,7 @@ void UserVideoDecode::init(KernelPatcher& patcher)
 {
     fairPlayDriverOnly = false;
     if (!checkKernelArgument("-NRedVideoFix")) { return; }
+    decodeGuard = !checkKernelArgument("-NRedNoDecodeGuard");
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
     const auto  rejected   = VCNCapabilities::rejection(deviceID, currentKernelVersion());
