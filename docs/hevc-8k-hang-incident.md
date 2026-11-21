@@ -59,9 +59,21 @@ AMD Cail: GPU HangState 0x00000000, HangFlags 0x00000004
   - `AMDRadeonX5000MTLDriver`：`__ZN9VAFactory13createDecoderEiP9VAContext`（现有 HEVC 门即在此，`cmp esi,6 / ja`）；
   - `AMDRadeonVADriver2`：`__ZN9VADecoder4InitEj` 内有同构判定
     （`mov esi,[rdi+0x78]` 取 codec、`cmp esi,6 / ja` 拒绝 >6），codec 字段在 `+0x78`。
-- **当前实现阻塞点**：`createDecoder / Init` 这两个入口只收到 codec 与对象指针，**没有直接拿到宽高**；
-  需要确认宽高在 `VADecoder`（或其 `+0x58` 上级对象）中的偏移，才能写"读宽高 → 比较 → 返回空解码器"。
-  取偏移必须做一次内存采样（一次 1080p/4K 硬解会话 + lldb 读对象），不能靠猜。
+- **宽高偏移已实测确认**（`VADecoder` 对象，`AMDRadeonVADriver2`，lldb 采样于 `VTDecoderXPCService`）：
+
+  | 校验样本 | `+0x78` codec | `+0x7c` width | `+0x80` height |
+  |---|---|---|---|
+  | AVC 1920×1080 | 0 | `0x780` = 1920 | `0x440` = 1088（1080 按 16 对齐） |
+  | AVC 1280×720 | 0 | `0x500` = 1280 | `0x2d0` = 720 |
+
+  采样方法：GUI 播放 → `VTDecoderXPCService` 内映射 `AMDRadeonVADriver2` →
+  lldb `br s -a $((镜像基址 + 0x7cc6))`（`VADecoder::Init` 在镜像内偏移 `0x7cc6`）→ 命中时读 `$rdi`。
+  注意：`br s -n __ZN9VADecoder4InitEj` 对这个缓存镜像解析不到（符号表对 lldb 不可见），必须按地址下断。
+
+- **实现方式（待落地）**：`VADecoder::Init` 入口处做 code cave——
+  读 `[rdi+0x78]` 若为 5（HEVC）且 `宽 > 4096 || 高 > 2304`，直接 `mov eax,3; ret`（沿用函数内既有的失败返回值 3），
+  否则跳回原入口继续。这样解码会话创建失败 → `VTDecompressionSessionCreate(http)` 得到错误 → 播放器回退软解，
+  VCN 完全不会收到超规格提交。
 
 ## 五、回滚与当前状态
 
