@@ -8,11 +8,12 @@
 | `-NRedScratch` | 在 26 上额外启用 SrdShared 与 ComputeScratch（26.0 形状机器码，语义未在 26.7.x 验证过） | 保持关闭 |
 | `-NRedVideoFix` | VCN 硬件视频加速，包含现有解码和编码路径 | VCN 桥接关闭 |
 | `NRedECFix=1` | 使用固件报告的 EC 背光来源 | EC 服务关闭 |
+| `-NRedGLMetal` | 全局 GL 渲染器路由：`IOGLBundleName` 由 `AMDRadeonX5000GLDriver` 改为 `AppleMetalOpenGLRenderer`（GL-on-Metal），修旧 Electron 类应用的 GFX 挂死 | 保持 legacy GLDriver |
 
 三项均启用的启动参数：
 
 ```text
--NRedDisplayFix -NRedVideoFix NRedECFix=1
+-NRedDisplayFix -NRedVideoFix NRedECFix=1 -NRedGLMetal
 ```
 
 只有需要主动切换固件控制来源时，才把 `NRedECFix=1` 改为 `NRedECFix=2`。
