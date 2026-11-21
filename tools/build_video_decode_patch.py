@@ -1,6 +1,7 @@
 """生成指定缓存的 VCN2 核显视频补丁；包含设备识别与已验证的编码协议修正。"""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -221,7 +222,12 @@ def main():
         name = "__ZN9VAFactory13createDecoderEiP9VAContext"
         address, code = function(name)
         assert code[0x07:0x10] == bytes.fromhex("83fe060f87a5000000"), "createDecoder 头部与 26.7.3 核验不符"
-        add(name, address + 0x07, code[0x07:0x10], bytes.fromhex("83fe050f83a5000000"), fairplay_decode=True)
+        # 仅用于 HEVC 硬件解码试验：置 NRED_ALLOW_HEVC_HW=1 时不写门，保持原始 cmp esi,6 / ja。
+        # 试验版必须单独构建、单独装机，验证后恢复带门版本。
+        if os.environ.get("NRED_ALLOW_HEVC_HW") == "1":
+            print("[hevc-experiment] HEVC 硬解门已跳过（原始拒绝 7 以上的判定保留）")
+        else:
+            add(name, address + 0x07, code[0x07:0x10], bytes.fromhex("83fe050f83a5000000"), fairplay_decode=True)
         code_section = next(s for s in sections if s[0] == "__text")
         text = cache.read(code_section[1], code_section[2])
         for old, new in [(0x2220221, 0x2020201), (0x6660661, 0x6060601)]:
