@@ -203,10 +203,18 @@ bool NRedAudio::enabled() const { return this->active; }
 void NRedAudio::init()
 {
     this->probeOnly = checkKernelArgument("-NRedAudioProbe");
-    this->active    = this->probeOnly || checkKernelArgument("-NRedAudioApply");
+    if (checkKernelArgument("-NRedAudioApply")) { this->stageMask = kStageAll; }
+    if (checkKernelArgument("-NRedAudioAz")) { this->stageMask |= kStageAz; }
+    if (checkKernelArgument("-NRedAudioAfmt")) { this->stageMask |= kStageAfmt; }
+    if (checkKernelArgument("-NRedAudioDpSec")) { this->stageMask |= kStageDpSec; }
+    if (checkKernelArgument("-NRedAudioDto")) { this->stageMask |= kStageDto; }
+    this->active = this->probeOnly || this->stageMask != 0;
+
     NRed::singleton().setProp32("NRedAudioMode", this->active ? (this->probeOnly ? 1U : 2U) : 0U);
+    NRed::singleton().setProp32("NRedAudioStage", this->probeOnly ? 0U : this->stageMask);
     if (this->active) {
-        SYSLOG("NRedAudio", "HDMI/DP audio %s mode", this->probeOnly ? "probe(read-only)" : "apply");
+        SYSLOG("NRedAudio", "HDMI/DP audio %s mode, stage mask 0x%X",
+               this->probeOnly ? "probe(read-only)" : "apply", this->stageMask);
     }
 }
 
@@ -278,11 +286,9 @@ void NRedAudio::scheduleDelayedProbe(const UInt32 delayMs)
 void NRedAudio::onControllerPowerUp()
 {
     if (!this->active) { return; }
-    if (this->probeOnly) { this->probeTopology(); return; }
-    this->settleRetries    = 0;
-    this->postLinkPassDone = false;
+    // framebuffer 上电阶段只发布只读快照：此时链路/时钟尚未稳定，任何写入都可能触发
+    // FullAsicReset（已在 14.8.9 上复现）。真正的配置在 DP 链路能力上报后做。
     this->probeTopology();
-    this->scheduleDelayedProbe(2000);
 }
 
 void NRedAudio::onLinkCapabilitiesReported()
@@ -400,22 +406,27 @@ bool NRedAudio::configureAudio(const bool pulseDpSec)
     const bool   afmtActive = (afmtStat & 0x10U) != 0 && (afmtSrc == extEp);
 
     const bool isDP = (extConnType == kConnectorDisplayPort);
-    configureAzaliaEndpoint(nred, blk, extEp, isDP);
 
-    const UInt32 targetMod = extPixClk / 100U;
-    const UInt32 curMod    = nred.readReg32(blk.dccgBase + kDcn21DccgAudioDto0Module);
-    const UInt32 curPhase  = nred.readReg32(blk.dccgBase + kDcn21DccgAudioDto0Phase);
-    if (!afmtActive) {
-        programAudioDto(nred, blk, extOtg, extPixClk);
-        configureAfmt(nred, blk, extDig, extEp);
-    } else {
-        if (curMod != targetMod || curPhase != kDtoPhase24MHz) { programAudioDto(nred, blk, extOtg, extPixClk); }
-        if (isDP && (nred.readReg32(blk.dcnBase + kDcn21AfmtPacketCtl2 + digOff) & 0x0000FF00U) == 0) {
+    if ((this->stageMask & kStageAz) != 0) { configureAzaliaEndpoint(nred, blk, extEp, isDP); }
+
+    if ((this->stageMask & kStageAfmt) != 0) {
+        if (!afmtActive) {
+            configureAfmt(nred, blk, extDig, extEp);
+        } else if (isDP && (nred.readReg32(blk.dcnBase + kDcn21AfmtPacketCtl2 + digOff) & 0x0000FF00U) == 0) {
             configureAfmt(nred, blk, extDig, extEp);
         }
     }
 
-    if (isDP) {
+    if ((this->stageMask & kStageDto) != 0) {
+        const UInt32 targetMod = extPixClk / 100U;
+        const UInt32 curMod    = nred.readReg32(blk.dccgBase + kDcn21DccgAudioDto0Module);
+        const UInt32 curPhase  = nred.readReg32(blk.dccgBase + kDcn21DccgAudioDto0Phase);
+        if (!afmtActive || curMod != targetMod || curPhase != kDtoPhase24MHz) {
+            programAudioDto(nred, blk, extOtg, extPixClk);
+        }
+    }
+
+    if (isDP && (this->stageMask & kStageDpSec) != 0) {
         if (pulseDpSec && (afmtStat & 0x10U) == 0) {
             const UInt32 infoReg = blk.dcnBase + kDcn21AfmtInfoFrame0 + digOff;
             nred.writeReg32(infoReg, nred.readReg32(infoReg) | 0x00000080U);

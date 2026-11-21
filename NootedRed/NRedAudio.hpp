@@ -60,6 +60,15 @@ private:
     bool          active{false};
     bool          probeOnly{false};
 
+    // 写入阶段位（只有对应开关打开才写某一处寄存器，避免一次全写把时钟树/链路写坏）
+    static constexpr UInt32 kStageAz    = 1U << 0;    // Azalia endpoint（AppleGFXHDA 已在写，风险较高）
+    static constexpr UInt32 kStageAfmt  = 1U << 1;    // DIG AFMT（音频信息帧/包使能）
+    static constexpr UInt32 kStageDpSec = 1U << 2;    // DP_SEC（DP 音频安全/流使能）
+    static constexpr UInt32 kStageDto   = 1U << 3;    // DCCG Audio DTO（音频时钟，最危险）
+    static constexpr UInt32 kStageAll   = 0xFU;
+
+    UInt32      stageMask{0};
+
     void        scheduleDelayedProbe(UInt32 delayMs = 2000);
     static void delayedProbeCallback(thread_call_param_t param0, thread_call_param_t param1);
     static auto resolveDcnIpBlock() -> DcnIpBlock;
