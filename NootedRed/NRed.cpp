@@ -32,6 +32,7 @@
 #include <Regs/SMU.hpp>
 #include <UserSurfaceSync.hpp>
 #include <UserVideoDecode.hpp>
+#include <UserVP9.hpp>
 #include <VCN.hpp>
 #include <X5000.hpp>
 #include <X6000FB.hpp>
@@ -66,6 +67,7 @@ void NRed::init()
         [](void* const, KernelPatcher& patcher)
         {
             singleton().processPatcher();
+            UserVP9::init();
             UserSurfaceSync::init(patcher);
             UserVideoDecode::init(patcher);
             DriverInjector::singleton().processPatcher(patcher);

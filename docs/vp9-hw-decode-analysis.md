@@ -161,3 +161,21 @@ VT 会话是否真正落到 VCN、`vdec_mode.swift` / Chrome 侧表现），异�
 
 > 说明：本文档只记录接口、偏移、机制与实测比对结论，未包含被评估仓库的源代码片段（除必要的
 > 少量字节/符号名用于定位）。
+
+## 落地实现（本仓库 `analysis/vp9-reference`）
+
+- `tools/gen_vp9_sites.py`：把参考数据集里的“站点偏移 + 原始字节 + 补丁字节”转换为本仓库可用的
+  纯字节表。生成时以本机真实 dyld 缓存为准做三级定位（数据集偏移仅在字节完全吻合时采信 →
+  目标镜像 __TEXT 内唯一命中 → 全缓存唯一命中），校验主缓存 UUID 后才产出，任何站点不唯一即报错退出。
+  结果：Darwin 25（26.7.3 / 25G342，UUID `5A3DA575F02E33DC9B14F663050011E6`）29 个站点全部唯一解析，
+  输出 `NootedRed/UserVP9SitesDarwin25.hpp`（偏移相对主缓存 unslid 基址）。
+- `NootedRed/UserVP9.cpp`：在 `_shared_region_check_np` 回调（由 `UserSurfaceSync` 转发，复用同一个
+  已安装的钩子，不重复路由系统符号）里对**当前进程**的共享缓存副本做 COW 安装：
+  先按最小站点探读判断本进程是否真的映射了 `AMDRadeonVADriver2`（未映射直接跳过，避免全系统进程都做
+  26 KB 读写），再逐站点校验原始字节，全部原始状态才整批写入，任一站点不符即整轮放弃；
+  写入失败回滚已写站点并恢复页权限。全部成功后通过 `IOService` 匹配 `IODVDBundleName == AMDRadeonVADriver2`
+  的加速器服务发布 `IOGVAXDecode="2"`、`IOGVAVP9Decode="1"`、`IOGVAVP9DecodeCapabilities.VTSupportedProfileArray={0,2}`；
+  不匹配/写失败则撤回能力键，保持软解可用。
+- 观测属性（写在 IGPU 上）：`NRedVP9State`（0=Off 1=Resolving 2=Ready 3=Failed）、`NRedVP9Applied`（已安装进程数）、
+  `NRedVP9Published`、`NRedVP9Withdrawn`、`NRedVP9MismatchSite`、`NRedVP9UUIDMismatch`、`NRedVP9LastVMError`。
+- 首飞门槛：必须显式 `-NRedVP9` 才启用（`-NRedNoVP9` 强制关闭），默认不改变现有系统行为。

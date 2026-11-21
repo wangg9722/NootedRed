@@ -5,6 +5,7 @@
 #include <UserLegacyData.hpp>
 #include <UserPatchMemory.hpp>
 #include <UserSubmitGuardData.hpp>
+#include <UserVP9.hpp>
 #include <UserSurfaceSync.hpp>
 #include <UserSurfaceSyncData.hpp>
 #include <UserSurfaceSyncResolver.hpp>
@@ -40,6 +41,8 @@ const UserLegacyCompat::Profile*           legacyProfile{nullptr};
 const UserSurfaceSyncData::DevicePatchSet* devicePatches{&UserSurfaceSyncData::DevicePatches[0]};
 
 constexpr auto PatchCount = arrsize(UserSurfaceSyncData::ComputeScratchPatches);
+// VP9 站点安装与显示修复共用回调，需要独立的启用状态。
+bool vp9Active{false};
 constexpr auto LegacyPatchCount = arrsize(UserSurfaceSyncData::LegacyBlendPatches);
 constexpr auto BaselinePatchCount = arrsize(UserSurfaceSyncData::Patches);
 static_assert(BaselinePatchCount == arrsize(UserSurfaceSyncData::SrdSharedPatches));
@@ -351,6 +354,8 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
         memcpy(&value, header + 88 + i * 4, sizeof(value));
         NRed::singleton().setProp32(uuidKeys[i], value);
     }
+    // 硬件 VP9 站点安装：与显示修复共用同一个共享区回调，独立校验 UUID 与原始字节。
+    UserVP9::apply(base, header + 88, readUser, writeUser, getTaskMap(current_task()), queryRegion);
     // 提交守卫按候选偏移逐字节核验入口，不再依赖缓存 UUID；核验不通过的进程自动跳过。
     if (submitGuard) {
         if (auto map = getTaskMap(current_task())) {
@@ -579,23 +584,26 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
     NRed::singleton().setProp32("NRedSrdSharedVersion", 1);
     NRed::singleton().setProp32("NRedLegacyBlendVersion", 1);
     NRed::singleton().setProp32("NRedComputeScratchVersion", 1);
-    if (!renderRequested) {
+    vp9Active = UserVP9::isEnabled();
+    if (!renderRequested && !vp9Active) {
         NRed::singleton().setProp32("NRedSubmitGuardDisabled", 1);
         return;
     }
-    NRed::singleton().setProp32("NRedImmediateSyncRequested", 1);
-    const auto deviceID = NRed::singleton().getDeviceID();
-    devicePatches       = UserSurfaceSyncData::findDevice(deviceID);
-    if (devicePatches == nullptr) {
-        NRed::singleton().setProp32("NRedImmediateSyncRejected", 3);
-        SYSLOG("UserSurfaceSync", "Unsupported render-fix device: 0x%X", deviceID);
-        return;
-    }
-    if (!currentKernelVersion().majorMatches(MACOS_26) && !legacyProfile) {
-        NRed::singleton().setProp32("NRedImmediateSyncRejected", 4);
-        SYSLOG("UserSurfaceSync", "Metal fix requires Darwin 23/24/25; found %u.%u", currentKernelVersion().major(),
-               currentKernelVersion().minor());
-        return;
+    bool renderActive = false;
+    if (renderRequested) {
+        NRed::singleton().setProp32("NRedImmediateSyncRequested", 1);
+        const auto deviceID = NRed::singleton().getDeviceID();
+        devicePatches       = UserSurfaceSyncData::findDevice(deviceID);
+        if (devicePatches == nullptr) {
+            NRed::singleton().setProp32("NRedImmediateSyncRejected", 3);
+            SYSLOG("UserSurfaceSync", "Unsupported render-fix device: 0x%X", deviceID);
+        } else if (!currentKernelVersion().majorMatches(MACOS_26) && !legacyProfile) {
+            NRed::singleton().setProp32("NRedImmediateSyncRejected", 4);
+            SYSLOG("UserSurfaceSync", "Metal fix requires Darwin 23/24/25; found %u.%u",
+                   currentKernelVersion().major(), currentKernelVersion().minor());
+        } else {
+            renderActive = true;
+        }
     }
     getTaskMap = reinterpret_cast<GetTaskMap>(patcher.solveSymbol(KernelPatcher::KernelID, "_get_task_map"));
     patcher.clearError();
@@ -613,7 +621,8 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
     if (!patcher.routeMultipleLong(KernelPatcher::KernelID, &request, 1)) {
         patcher.clearError(); NRed::singleton().setProp32("NRedImmediateSyncRejected", 2); return;
     }
-    NRed::singleton().setProp32("NRedDisplayFixEnabled", 1);
+    renderRequested = renderActive;
+    NRed::singleton().setProp32("NRedDisplayFixEnabled", renderActive ? 1 : 0);
     NRed::singleton().setProp32("NRedImmediateSyncDisabled", 1);
     NRed::singleton().setProp32("NRedImmediateSyncRegionQueryVersion", 1);
     if (submitGuard) {
@@ -633,6 +642,7 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
         SYSLOG("UserSurfaceSync", "ComputeScratch-v1 enabled: single-SE scratch sizing; native kernel preserved; "
                "exact cache/code required");
     }
-    SYSLOG("UserSurfaceSync", "Metal hooks enabled: Darwin %u, device 0x%X, render=%u submit=%u",
-           currentKernelVersion().major(), deviceID, renderRequested, submitGuard);
+    SYSLOG("UserSurfaceSync", "Metal hooks enabled: Darwin %u, device 0x%X, render=%u submit=%u vp9=%u",
+           currentKernelVersion().major(), NRed::singleton().getDeviceID(), renderRequested, submitGuard,
+           vp9Active);
 }

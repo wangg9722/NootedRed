@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		ECB100010000000000000001 /* ECBacklight.cpp in Sources */ = {isa = PBXBuildFile; fileRef = ECB100020000000000000001 /* ECBacklight.cpp */; };
 		EF0400010000000000000005 /* UserVideoDecode.cpp in Sources */ = {isa = PBXBuildFile; fileRef = EF0400020000000000000005 /* UserVideoDecode.cpp */; };
+		EF0400010000000000000105 /* UserVP9.cpp in Sources */ = {isa = PBXBuildFile; fileRef = EF0400020000000000000105 /* UserVP9.cpp */; };
 		EF0400010000000000000002 /* VCN.cpp in Sources */ = {isa = PBXBuildFile; fileRef = EF0400020000000000000002 /* VCN.cpp */; };
 		EF0400010000000000000001 /* UserSurfaceSync.cpp in Sources */ = {isa = PBXBuildFile; fileRef = EF0400020000000000000001 /* UserSurfaceSync.cpp */; };
 		1C748C2D1C21952C0024EED2 /* Plugin.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C748C2C1C21952C0024EED2 /* Plugin.cpp */; };
@@ -117,6 +118,9 @@
 		ECB100020000000000000001 /* ECBacklight.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ECBacklight.cpp; sourceTree = "<group>"; };
 		ECB100020000000000000002 /* ECBacklight.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ECBacklight.hpp; sourceTree = "<group>"; };
 		EF0400020000000000000007 /* UserVideoDecodeData.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVideoDecodeData.hpp; sourceTree = "<group>"; };
+		EF0400020000000000000105 /* UserVP9.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = UserVP9.cpp; sourceTree = "<group>"; };
+		EF0400020000000000000106 /* UserVP9.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVP9.hpp; sourceTree = "<group>"; };
+		EF0400020000000000000107 /* UserVP9SitesDarwin25.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVP9SitesDarwin25.hpp; sourceTree = "<group>"; };
 		EF0400020000000000000006 /* UserVideoDecode.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVideoDecode.hpp; sourceTree = "<group>"; };
 		EF0400020000000000000005 /* UserVideoDecode.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = UserVideoDecode.cpp; sourceTree = "<group>"; };
 		EF0400020000000000000004 /* VCNKernelData.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = VCNKernelData.hpp; sourceTree = "<group>"; };
@@ -328,6 +332,9 @@
 				407068652E966678004E0761 /* Personalities */,
 				408B3DD62CDFA41A00CAE5D2 /* Regs */,
 				EF0400020000000000000001 /* UserSurfaceSync.cpp */,
+				EF0400020000000000000107 /* UserVP9SitesDarwin25.hpp */,
+				EF0400020000000000000106 /* UserVP9.hpp */,
+				EF0400020000000000000105 /* UserVP9.cpp */,
 				EF0400020000000000000007 /* UserVideoDecodeData.hpp */,
 				EF0400020000000000000006 /* UserVideoDecode.hpp */,
 				EF0400020000000000000005 /* UserVideoDecode.cpp */,
@@ -774,6 +781,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				EF0400010000000000000001 /* UserSurfaceSync.cpp in Sources */,
+				EF0400010000000000000105 /* UserVP9.cpp in Sources */,
 				EF0400010000000000000005 /* UserVideoDecode.cpp in Sources */,
 				EF0400010000000000000002 /* VCN.cpp in Sources */,
 				4068898B2A229BF600028D22 /* PatcherPlus.cpp in Sources */,
