@@ -21,6 +21,7 @@
 #include <IOKit/acpi/IOACPIPlatformExpert.h>
 #include <Kexts.hpp>
 #include <NRed.hpp>
+#include <NRedAudio.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
 #include <PenguinWizardry/PatcherPlus.hpp>
 #include <Regs/OSSSYS_4.hpp>
@@ -587,6 +588,8 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     if (send) { singleton().orgMessageAccelerator(self, IOFBRequestControllerEnabled, nullptr, nullptr, nullptr); }
     // 加速器服务此时已发布，补一次 GL 渲染器路由覆盖
     NRed::singleton().publishGLBundleName();
+    // framebuffer 上电：把 DCN 侧音频管线（DTO / Azalia endpoint / AFMT / DP_SEC）配起来
+    if (NRedAudio::singleton().enabled()) { NRedAudio::singleton().onControllerPowerUp(); }
     return ret;
 }
 
@@ -594,6 +597,8 @@ void X6000FB::wrapDpReceiverPowerCtrl(void* const link, const bool powerOn)
 {
     FunctionCast(wrapDpReceiverPowerCtrl, singleton().orgDpReceiverPowerCtrl)(link, powerOn);
     IOSleep(250);
+    // DP 链路重新上电/训练后，音频侧需要重新 latch（只在开启音频修复时触发）。
+    if (powerOn && NRedAudio::singleton().enabled()) { NRedAudio::singleton().onLinkCapabilitiesReported(); }
 }
 
 void* X6000FB::wrapCreateObjectInfo(void* const helper, const UInt32 tableOffset)
