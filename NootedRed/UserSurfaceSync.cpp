@@ -563,9 +563,19 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
 {
     legacyProfile   = UserLegacyData::metal(currentKernelVersion().major());
     renderRequested = false;
-    // -NRedNoSubmitGuard 只关提交守卫，保留显示修复（门与设备设置改写）。
-    submitGuard     = checkKernelArgument("-NRedDisplayFix") && !checkKernelArgument("-NRedNoSubmitGuard");
-    legacyBlend = renderRequested = submitGuard;
+    // 提交守卫（把命令队列空闲尾填 PM4 filler）在旧系统上默认**不装**：
+    // 14.8.9 上实测 VTDecoderXPCService 这样被装进后，VCN 解码环被 filler 写脏，
+    // job 的 fence 永不 retire（channel 12 VCN0Dec hung，每 7s 一次 FullAsicReset，
+    // WindowServer 120s 无 checkin 被 watchdog panic），表现为登录后数秒界面卡死。
+    // 旧系统的守卫偏移（0x30355E210 / 0x3087C3580）需要按“GFX 队列 vs 解码队列”重新
+    // 界定作用域后才可恢复；复现时用 -NRedSubmitGuardLegacy 显式打开。
+    // -NRedNoSubmitGuard 只关提交守卫，显示修复（门与设备设置改写）照旧保留。
+    const bool displayFix        = checkKernelArgument("-NRedDisplayFix");
+    const bool noSubmitGuard     = checkKernelArgument("-NRedNoSubmitGuard");
+    const bool legacySubmitGuard = checkKernelArgument("-NRedSubmitGuardLegacy");
+    submitGuard     = displayFix && !noSubmitGuard
+                      && (currentKernelVersion().majorMatches(MACOS_26) || legacySubmitGuard);
+    legacyBlend = renderRequested = displayFix;
     // scratch/srdShared 用的是 26.0 时代的机器码形状，在 26.7.x 上语义已变，因此默认关闭，
     // 只有显式 -NRedScratch 才启用；-NRedDisplayFix 只负责门（LegacyBlend）与 SubmitGuard。
     const bool scratchRequested = checkKernelArgument("-NRedScratch");
@@ -583,6 +593,7 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
         NRed::singleton().setProp32("NRedSubmitGuardDisabled", 1);
         return;
     }
+    if (!submitGuard) { NRed::singleton().setProp32("NRedSubmitGuardDisabled", 1); }
     NRed::singleton().setProp32("NRedImmediateSyncRequested", 1);
     const auto deviceID = NRed::singleton().getDeviceID();
     devicePatches       = UserSurfaceSyncData::findDevice(deviceID);
