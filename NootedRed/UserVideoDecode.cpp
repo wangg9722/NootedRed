@@ -40,7 +40,7 @@ namespace
     UInt32                            seenStages{0}, appliedCount{0}, errorCount{0};
     bool                              fairPlayDriverOnly{false};
     bool                              decodeGuard{true};
-    bool                              legacyNoVCNUser{false}, legacyNoFairPlay{false}, legacyNoGuard{false};
+    bool                              legacyNoVCNUser{false}, legacyNoFairPlay{false}, legacyGuard{false};
     UInt32                            decodeGuardApplied{0}, decodeGuardRejected{0};
     const UserVideoDecodeData::Patch* devicePatches{nullptr};
     const UserLegacyCompat::Profile*  legacyProfile{nullptr};
@@ -351,7 +351,7 @@ namespace
             return result;
         }
         // 解码规格守卫独立于渲染修复与 FairPlay 权限：只要缓存与镜像对得上就在本进程装一次。
-        if (decodeGuard && !(legacyProfile && legacyNoGuard)) {
+        if (decodeGuard && !(legacyProfile && !legacyGuard)) {
             if (auto map = getTaskMap(current_task())) {
                 bool       fresh{false};
                 const auto installed = installDecodeGuard(map, base, fresh);
@@ -533,10 +533,12 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     if (!checkKernelArgument("-NRedVideoFix")) { return; }
     // 旧系统（14/15）用 legacyProfile 里的静态补丁数据，与 26 的动态解析路径互为独立。
     // 下列开关只对 legacyProfile 生效，26 上完全无影响，便于在 14 上分组二分定位挂死来源。
-    legacyNoVCNUser = checkKernelArgument("-NRedNoVCNUserLegacy");
+    // 解码规格守卫在 14.8.9 上会让 VCN 解码 fence 永不 retire（每 7s 一次 FullAsicReset），
+    // 因此旧系统默认不装守卫，需要复现/验证时用 -NRedDecodeGuardLegacy 显式打开。
+    legacyNoVCNUser  = checkKernelArgument("-NRedNoVCNUserLegacy");
     legacyNoFairPlay = checkKernelArgument("-NRedNoDRMVideoLegacy");
-    legacyNoGuard    = checkKernelArgument("-NRedNoDecodeGuardLegacy");
-    decodeGuard = !checkKernelArgument("-NRedNoDecodeGuard");
+    legacyGuard      = checkKernelArgument("-NRedDecodeGuardLegacy");
+    decodeGuard      = !checkKernelArgument("-NRedNoDecodeGuard");
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
     const auto  rejected   = VCNCapabilities::rejection(deviceID, currentKernelVersion());
