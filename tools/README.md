@@ -7,6 +7,8 @@
 
 | 工具 | 产出 |
 | --- | --- |
+| `vdec_mode.swift` | 一条命令判断某文件走硬解还是软解（VT 会话属性，最权威） |
+
 | `build_vcn_kernel_patch.py` | VCN 内核侧补丁 |
 | `build_video_decode_patch.py` | `UserVideoDecodeData.hpp`（含 HEVC 硬解门） |
 | `build_surface_sync_patch.py` | `UserSurfaceSyncData.hpp`（LegacyBlend / scratch） |
