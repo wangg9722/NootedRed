@@ -578,12 +578,18 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
     // 旧系统的守卫偏移（0x30355E210 / 0x3087C3580）需要按“GFX 队列 vs 解码队列”重新
     // 界定作用域后才可恢复；复现时用 -NRedSubmitGuardLegacy 显式打开。
     // -NRedNoSubmitGuard 只关提交守卫，显示修复（门与设备设置改写）照旧保留。
+    // 旧系统（Darwin 23/24）默认不装显示修复：实测 14.8.9 上这两组补丁都不装时显示与解码
+    // 均正常（-NRedNoSubmitGuard 期间的表现），而打开显示修复后一登录即崩。
+    // 因此旧系统与守卫同样处理——默认不装，需要时用 -NRedDisplayFixLegacy 显式打开。
     const bool displayFix        = checkKernelArgument("-NRedDisplayFix");
     const bool noSubmitGuard     = checkKernelArgument("-NRedNoSubmitGuard");
     const bool legacySubmitGuard = checkKernelArgument("-NRedSubmitGuardLegacy");
-    submitGuard     = displayFix && !noSubmitGuard
+    const bool legacyDisplayFix  = checkKernelArgument("-NRedDisplayFixLegacy");
+    const bool displayFixHere    = displayFix
+                                   && (currentKernelVersion().majorMatches(MACOS_26) || legacyDisplayFix);
+    submitGuard     = displayFixHere && !noSubmitGuard
                       && (currentKernelVersion().majorMatches(MACOS_26) || legacySubmitGuard);
-    legacyBlend = renderRequested = displayFix;
+    legacyBlend = renderRequested = displayFixHere;
     // scratch/srdShared 用的是 26.0 时代的机器码形状，在 26.7.x 上语义已变，因此默认关闭，
     // 只有显式 -NRedScratch 才启用；-NRedDisplayFix 只负责门（LegacyBlend）与 SubmitGuard。
     const bool scratchRequested = checkKernelArgument("-NRedScratch");
