@@ -533,15 +533,11 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     if (!checkKernelArgument("-NRedVideoFix")) { return; }
     // 旧系统（14/15）用 legacyProfile 里的静态补丁数据，与 26 的动态解析路径互为独立。
     // 下列开关只对 legacyProfile 生效，26 上完全无影响，便于在 14 上分组二分定位挂死来源。
-    // 解码规格守卫（超规格 HEVC 拒硬解 → 回退软解）在旧系统上一律默认安装：
-    // 8K 等宽 > 4096 / 高 > 2304 的码流直接进 VCN 会触发 fence 永不 retire（每 7s 一次
-    // FullAsicReset → WindowServer 120s 无 checkin → panic）。守卫在 Init 入口把这类提交
-    // 拒掉，VCN 根本收不到超规格任务，因此不需要靠移走测试片这类绕路。
-    // -NRedDecodeGuardLegacy 保留为显式强制打开（兼容旧脚本），-NRedNoDecodeGuardLegacy 关闭。
+    // 解码规格守卫在 14.8.9 上会让 VCN 解码 fence 永不 retire（每 7s 一次 FullAsicReset），
+    // 因此旧系统默认不装守卫，需要复现/验证时用 -NRedDecodeGuardLegacy 显式打开。
     legacyNoVCNUser  = checkKernelArgument("-NRedNoVCNUserLegacy");
     legacyNoFairPlay = checkKernelArgument("-NRedNoDRMVideoLegacy");
-    legacyGuard      = !checkKernelArgument("-NRedNoDecodeGuardLegacy")
-                       || checkKernelArgument("-NRedDecodeGuardLegacy");
+    legacyGuard      = checkKernelArgument("-NRedDecodeGuardLegacy");
     decodeGuard      = !checkKernelArgument("-NRedNoDecodeGuard");
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
