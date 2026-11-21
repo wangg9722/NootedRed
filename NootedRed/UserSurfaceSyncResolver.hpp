@@ -26,9 +26,10 @@ namespace UserSurfaceSyncResolver
 
     struct Plan
     {
-        UserSurfaceSyncData::Patch patches[4]{};
-        UInt8                      original[4][MaxPatchSize]{};
-        UInt8                      patched[4][MaxPatchSize]{};
+        // 0 init / 1 override / 2 blend gate / 3 blend allow / 4 scratch
+        UserSurfaceSyncData::Patch patches[5]{};
+        UInt8                      original[5][MaxPatchSize]{};
+        UInt8                      patched[5][MaxPatchSize]{};
         UInt32                     reads{0};
     };
     inline bool imageForCache(Input& input, UInt64 base, Image& image)
@@ -92,8 +93,11 @@ namespace UserSurfaceSyncResolver
                                              {
                                                  return skipped(index, fields, fieldCount)
                                                         || (!fields && displacementByte(expected, index, size))
-                                                        || (blend && index >= BlendGateInConstructor
-                                                            && index - BlendGateInConstructor < 2)
+                                                        || (blend
+                                                            && ((index >= BlendGateInConstructor
+                                                                    && index - BlendGateInConstructor < 2)
+                                                                || (index >= BlendAllowInConstructor
+                                                                    && index - BlendAllowInConstructor < 3)))
                                                         || value == expected[index];
                                              });
     }
@@ -132,8 +136,8 @@ namespace UserSurfaceSyncResolver
         if (scratchMode) {
             using namespace ScratchResolverData;
             if (!UserCacheResolver::resolve(input, base, ResolverImages, ResolverFunctions, device.scratch + 3,
-                                            ResolverLocations, plan.patches + 3, &plan.original[3][0],
-                                            &plan.patched[3][0], MaxPatchSize))
+                                            ResolverLocations, plan.patches + 4, &plan.original[4][0],
+                                            &plan.patched[4][0], MaxPatchSize))
             {
                 diagnosticReason() = 2;
                 return false;
@@ -252,9 +256,15 @@ namespace UserSurfaceSyncResolver
         }
         memcpy(plan.original[2], BlendGateOriginal, sizeof(BlendGateOriginal));
         memcpy(plan.patched[2], BlendGatePatched, sizeof(BlendGatePatched));
-        const UInt64 addresses[] = {init, overrideAddress, constructor + BlendGateInConstructor};
-        for (UInt32 i = 0; i < 3; ++i) {
-            const auto length = i == 0 ? sizeof(Original0) : (i == 1 ? sizeof(Original1) : sizeof(BlendGateOriginal));
+        memcpy(plan.original[3], BlendAllowOriginal, sizeof(BlendAllowOriginal));
+        memcpy(plan.patched[3], BlendAllowPatched, sizeof(BlendAllowPatched));
+        const UInt64 addresses[] = {init, overrideAddress, constructor + BlendGateInConstructor,
+                                    constructor + BlendAllowInConstructor};
+        for (UInt32 i = 0; i < 4; ++i) {
+            const auto length = i == 0   ? sizeof(Original0)
+                                : i == 1 ? sizeof(Original1)
+                                : i == 2 ? sizeof(BlendGateOriginal)
+                                         : sizeof(BlendAllowOriginal);
             if (!input.cache.contains(addresses[i], length)) {
                 diagnosticReason() = 8;
                 return false;

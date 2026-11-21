@@ -82,10 +82,21 @@ inline constexpr UInt8 BlendGateOriginal[] = {
 inline constexpr UInt8 BlendGatePatched[] = {
     0x90, 0x90
 };
+// 26 的门是 caps0_skip：能力位为假就跳过 `dualSource || !allowRBPlus` 的计算。
+// 只把门 NOP 掉会让 allowRBPlus 恒为假 → 对所有 pipeline 禁用双 quad（FenceNotRetired / FullAsicReset）。
+// 因此再补一条：把 `sete cl`（allowRBPlus 取反）改为 `xor ecx,ecx`，使结果恒等于 dualSource，
+// 即只对双源混合禁用双 quad，与上游「不强制禁用所有 pipeline」的意图一致。
+inline constexpr UInt8 BlendAllowOriginal[] = {
+    0x0F, 0x94, 0xC1
+};
+inline constexpr UInt8 BlendAllowPatched[] = {
+    0x31, 0xC9, 0x90
+};
 inline constexpr Patch LegacyBlendPatches[] = {
     {0x310D71A28ULL, Original0, SrdSharedPatched0, sizeof(Original0)},
     {0x310D71AFFULL, Original1, SrdSharedPatched1, sizeof(Original1)},
-    {0x310C77708ULL, BlendGateOriginal, BlendGatePatched, sizeof(BlendGateOriginal)}
+    {0x310C77708ULL, BlendGateOriginal, BlendGatePatched, sizeof(BlendGateOriginal)},
+    {0x310C7772AULL, BlendAllowOriginal, BlendAllowPatched, sizeof(BlendAllowOriginal)}
 };
 struct Guard { UInt64 offset; const UInt8* original; UInt32 size; };
 inline constexpr UInt8 WithdrawnOriginal0[] = {
@@ -379,7 +390,8 @@ inline constexpr Patch ComputeScratchPatches[] = {
     LegacyBlendPatches[0],
     LegacyBlendPatches[1],
     LegacyBlendPatches[2],
-    {0x310CFB11EULL, ScratchOriginal, ScratchPatched, sizeof(ScratchOriginal)}
+    {0x310CFB11EULL, ScratchOriginal, ScratchPatched, sizeof(ScratchOriginal)},
+    LegacyBlendPatches[3]
 };
 inline constexpr UInt8 ScratchPatched15D8[] = {
     0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xEC,
@@ -1208,7 +1220,8 @@ inline constexpr UInt8 BlendConstructor[] = {
     0xD0, 0x75, 0x15, 0x48, 0x89, 0xF8, 0x48, 0x81, 0xC4, 0x18, 0x02, 0x00, 0x00, 0x5B, 0x41, 0x5C,
     0x41, 0x5D, 0x41, 0x5E, 0x41, 0x5F, 0x5D, 0xC3, 0xE8, 0xF9, 0xEC, 0x33, 0x00, 0x90
 };
-inline constexpr UInt32 BlendGateInConstructor = 4122;
+inline constexpr UInt32 BlendGateInConstructor = 4122;   // 0x101A：caps0_skip 条件跳转
+inline constexpr UInt32 BlendAllowInConstructor = 4156;  // 0x103C：sete cl（allowRBPlus 取反）
 inline constexpr UInt32 OverrideEntryInInit = 166;
 inline constexpr char DriverPath[] = "/System/Library/Extensions/AMDRadeonX5000MTLDriver.bundle/Contents/MacOS/AMDRadeonX5000MTLDriver";
 inline constexpr UInt64 InitRVA = 0x123A28ULL;

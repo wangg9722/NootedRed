@@ -25,6 +25,7 @@ CTOR_SYMBOL_HINTS = ("GFX9_MtlRenderPipelineState", "initWithDevice")
 CAPS_OFFSET = 0xA0          # 能力报告结构内的 dual-quad 支持位所在偏移
 CAPS_MASK = 2              # bit1
 COLOR_CONTROL_OFFSET = 0x28  # CB_COLOR_CONTROL 在 pipeline 目标结构中的偏移
+BLEND_ALLOW_IN_CONSTRUCTOR = 4156  # 0x103C，与 UserSurfaceSyncData 中的常量一致
 DISABLE_DUAL_QUAD_CLEAR = 0xFFFFFFFE
 BRANCHES = {"je", "jne", "jz", "jnz", "jb", "jae", "jbe", "ja", "jl", "jge", "jle", "jg", "js", "jns"}
 
@@ -110,6 +111,15 @@ def analyse(reader):
                          or (i.mnemonic in ("movabs", "mov") and first_imm(i) == 0x400000000)
                          for i in following)
             form = {"je": "caps0_skip", "jne": "caps1_skip"}.get(branch.mnemonic, "other")
+            sete = next((i for i in following if i.mnemonic == "sete"), None)
+            allow = None
+            if sete is not None:
+                allow_bytes = reader.read(sete.address, 3)
+                allow = {
+                    "encoded": allow_bytes.hex(),
+                    "expected_x86_64": "0f94c1",
+                    "offset": sete.address - ctor,
+                }
             gates.append({
                 "offset": ins.address - ctor,
                 "address": ins.address,
@@ -118,6 +128,7 @@ def analyse(reader):
                 "branch_offset": branch.address - ctor,
                 "branch_bytes": reader.read(branch.address, 2).hex(),
                 "form": form,
+                "allow": allow,
                 "target": f"{target:#x}",
                 "target_is_color_control": ok,
                 "target_parts": parts,
@@ -195,6 +206,13 @@ def main():
               f"{chose['target_parts']}")
         print(f"  目标前几条：{' | '.join(chose['target_snippet'])}")
         print(f"  分支内计算 dualSource：{chose['computes_dual_source']}；校验 allowRBPlus：{chose['checks_rbplus']}")
+        allow = chose.get("allow")
+        if allow is not None:
+            same = allow["encoded"] == allow["expected_x86_64"]
+            print(f"  allow 位置：ctor + {allow['offset']:#x}（仓库 BlendAllowInConstructor = {BLEND_ALLOW_IN_CONSTRUCTOR:#x}），"
+                  f"字节 {allow['encoded']} → {'与 BlendAllowOriginal 一致' if same else '不一致，禁止写 allow 补丁'}")
+            if not same:
+                return 1
         print(f"\n结论：{advice}")
     return 0
 
