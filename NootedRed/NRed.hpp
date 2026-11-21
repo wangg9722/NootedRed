@@ -63,5 +63,7 @@ public:
     void processPatcher();    // TODO: Remove!
 
     void   setProp32(const char* key, UInt32 value) const;    // TODO: Remove!
+    bool   isMmioReady() const { return this->rmmio != nullptr && this->rmmioPtr != nullptr; }    // TODO: Remove!
     UInt32 readReg32(UInt32 reg) const;                       // TODO: Remove!
+    void   writeReg32(UInt32 reg, UInt32 value) const;        // TODO: Remove!
 };
