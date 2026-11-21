@@ -54,6 +54,14 @@ namespace
     constexpr UInt32 kDcn21AzRegDescriptor0      = 0x28;
     constexpr UInt32 kAzDescCount                 = 4;
 
+    bool consoleSessionUp()
+    {
+        auto* const root = IOService::getServiceRoot();
+        if (root == nullptr) { return false; }
+        const auto* const users = root->getProperty("IOConsoleUsers");
+        return users != nullptr;
+    }
+
     UInt32 readPropU32(IOService* const svc, const char* const key)
     {
         if (svc == nullptr || key == nullptr) { return 0; }
@@ -259,6 +267,16 @@ void NRedAudio::delayedProbeCallback(thread_call_param_t, thread_call_param_t)
 {
     static constexpr UInt32 kRetryDelaysMs[] = {1000, 1000, 1500, 1500};
     auto&                   audio            = singleton();
+
+    // 写入必须等图形会话建立之后：登录时 WindowServer 会重新做 modeset，此时动 DCN 音频寄存器
+    // 会和 modeset 抢同一条链路/时钟，触发 FullAsicReset（14.8.9 上已在登录时复现）。
+    if (!audio.probeOnly && !consoleSessionUp()) {
+        if (audio.consoleWaitTries < kConsoleWaitMax) {
+            audio.consoleWaitTries++;
+            audio.scheduleDelayedProbe(1000);
+        }
+        return;
+    }
     const bool              settled          = audio.configureAudio(audio.postLinkPassDone);
     audio.probeTopology();
     if (!settled && audio.settleRetries < (sizeof(kRetryDelaysMs) / sizeof(kRetryDelaysMs[0]))) {
@@ -297,6 +315,7 @@ void NRedAudio::onLinkCapabilitiesReported()
     if (this->probeOnly) { this->probeTopology(); return; }
     this->settleRetries    = 0;
     this->postLinkPassDone = false;
+    this->consoleWaitTries = 0;
     this->probeTopology();
     this->scheduleDelayedProbe(2000);
 }

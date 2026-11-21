@@ -68,6 +68,8 @@ private:
     static constexpr UInt32 kStageAll   = 0xFU;
 
     UInt32      stageMask{0};
+    UInt32      consoleWaitTries{0};
+    static constexpr UInt32 kConsoleWaitMax = 120;    // 最多等 120s 图形会话建立
 
     void        scheduleDelayedProbe(UInt32 delayMs = 2000);
     static void delayedProbeCallback(thread_call_param_t param0, thread_call_param_t param1);
