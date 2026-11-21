@@ -18,6 +18,8 @@ CACHE_BASE = 0x7FF800000000
 CANDIDATES = [
     ("macOS 26.7.3", 0x7FFB10B00000 - CACHE_BASE + 0x7CC6),
     ("macOS 14.8.9", 0x7FFB0339C000 - CACHE_BASE + 0x3FA4),
+    # 26.4 / 25E246：VADriver2 映像整体前移，Init 在 0x7FFB10A0FCC6，入口 24 字节与参考一致。
+    ("macOS 26.4", 0x7FFB10A0FCC6 - CACHE_BASE),
 ]
 # 入口前 24 字节（前 6 条指令，止于 0x18 的指令边界）。
 ENTRY_ORIGINAL = bytes.fromhex(

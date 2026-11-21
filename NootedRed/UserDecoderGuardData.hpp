@@ -5,6 +5,7 @@ namespace UserDecoderGuardData {
 inline constexpr UInt64 Offsets[] = {
     0x310B07CC6ULL, // macOS 26.7.3
     0x30339FFA4ULL, // macOS 14.8.9
+    0x310A0FCC6ULL, // macOS 26.4
 };
 inline constexpr UInt32 OffsetCount = sizeof(Offsets) / sizeof(Offsets[0]);
 inline constexpr UInt32 PatchSize = 24;
