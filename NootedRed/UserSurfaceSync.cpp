@@ -563,9 +563,15 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
 {
     legacyProfile   = UserLegacyData::metal(currentKernelVersion().major());
     renderRequested = false;
-    // -NRedNoSubmitGuard 只关提交守卫，保留显示修复（门与设备设置改写）。
-    submitGuard     = checkKernelArgument("-NRedDisplayFix") && !checkKernelArgument("-NRedNoSubmitGuard");
-    legacyBlend = renderRequested = submitGuard;
+    // 提交守卫默认关闭（基线不启用）：它会在用户态把命令队列“已用尾..容量尾”的空闲区整段写成
+    // PM4 filler，实测在 14.8.9 上装进 VTDecoderXPCService 后，VCN 解码环被写脏、job 的 fence
+    // 永不 retire（channel 12 VCN0Dec hung，每 7s 一次 FullAsicReset → WindowServer 120s 无
+    // checkin 被 watchdog panic）。26.4 上虽未观察到不良影响，但其必要性从未被隔离验证，故一并
+    // 不默认启用；需要复现时用 -NRedSubmitGuard 显式打开。
+    const bool displayFix     = checkKernelArgument("-NRedDisplayFix");
+    const bool submitGuardOn  = checkKernelArgument("-NRedSubmitGuard");
+    submitGuard     = displayFix && submitGuardOn && !checkKernelArgument("-NRedNoSubmitGuard");
+    legacyBlend = renderRequested = displayFix;
     // scratch/srdShared 用的是 26.0 时代的机器码形状，在 26.7.x 上语义已变，因此默认关闭，
     // 只有显式 -NRedScratch 才启用；-NRedDisplayFix 只负责门（LegacyBlend）与 SubmitGuard。
     const bool scratchRequested = checkKernelArgument("-NRedScratch");
