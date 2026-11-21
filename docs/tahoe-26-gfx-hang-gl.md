@@ -56,10 +56,37 @@ work1 的 boot-args 缺 `-NRedGLMetal`，而 249 有，24h 挂死数 0 vs 13，�
 | 开机至今 `GFX is hung` | 0 |
 | Chrome WebGL（aquarium）压测 60 秒 | 挂死 0（修复前同脚本 12 次） |
 
+## SubmitGuard：过期偏移与多版本候选表
+
+SubmitGuard 修补 `-[GFX9AMD_MtlCmdQueue submitCommandBuffers:count:]`，在该方法入口
+挂一层蹦床，把每个命令缓冲记录里「已用尾 → 容量尾」的空闲区填成 PM4 filler
+（`0x80000000`），防止 CP 把尾部残留当指令执行导致 `FenceNotRetired`。
+
+历史数据里的 `MethodOffset = 0x310CE7240` 已过期：在那两个系统上它并不是该方法入口。
+真实位置是**映像相对偏移 `0x99240` 恒定**，缓存相对偏移随映像基址变化：
+
+| 系统 | MTL 驱动映像基址 | 方法缓存偏移 |
+| --- | --- | --- |
+| macOS 26.7.3 | `0x7FFB10C50000` | `0x310CE9240` |
+| macOS 26.4 | `0x7FFB10B58000` | `0x310BF1240` |
+
+以前只有 `knownCache`（缓存 UUID 与参考一致）才尝试安装，而两机缓存 UUID 都不同，
+于是既没有 `Applied` 也没有 `Rejected`——**守卫是静默休眠的**。现在改为候选表 +
+运行时按 15 字节入口逐字节核验（与解码守卫同一套做法），安装不再依赖缓存 UUID，
+核验不过只跳过该候选；`-NRedNoSubmitGuard` 可以只关守卫、保留显示修复。
+
+## 实测（work1，26.4，2026-11-21 15:05 启动）
+
+| 项 | 结果 |
+| --- | --- |
+| `NRedSubmitGuardOffsetIndex` | 1（命中 26.4 候选） |
+| `Applied` / `WindowServerApplied` | 16 / 1（WindowServer pid 197） |
+| 开机至今 GFX / VCN 挂死 | 0 |
+| Chrome WebGL 400 draw/frame × 60 秒 | 挂死 0 |
+| 4K HEVC 300 帧 | 硬解，错误帧 1 |
+| 闲置 5 分钟 `timed out fence` | 0（安装前约 7.5 次/5 分钟） |
+
 ## 仍然存在、未处理
 
-- SubmitGuard 未安装（work1 与 249 都没有 `NRedSubmitGuardApplied`）：
-  `UserSubmitGuardData::MethodOffset`（`0x310CE7240`）在当前缓存里已不对应
-  `MethodOriginal` 的 15 字节，`tools/build_submit_guard.py` 在 26.4 上直接拒绝生成。
-  这台机器上的实际修复来自 `LegacyBlend` + 设备设置改写，SubmitGuard 属独立缺口。
+- macOS 14 分区"进桌面即卡死"是另一个问题，见 `version-selection-matrix.md`。
 - macOS 14 分区"进桌面即卡死"是另一个问题，见 `version-selection-matrix.md`。
