@@ -388,15 +388,14 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
     }
 
     // 禁止在残留另一策略的进程中把旧模式误报为已生效；切换参数仍需重启。
+    // 只校验 scratch 专属那一条（索引 3）：allow 属于 LegacyBlend，开启时已经在应用范围内。
     if (!legacyProfile && !dynamic && !scratchHere) {
         UInt8 ctx[MaxPatchSize];
-        for (UInt32 i = patchCount; i < PatchCount; ++i) {
-            const auto& extra = ComputeScratchPatches[i];
-            if (readUser(base + extra.offset, ctx, extra.size) != 0 || memcmp(ctx, extra.original, extra.size) != 0)
-            {
-                stage(Stage::CodeMismatch);
-                return result;
-            }
+        const auto& extra = ComputeScratchPatches[3];
+        if (readUser(base + extra.offset, ctx, extra.size) != 0 || memcmp(ctx, extra.original, extra.size) != 0)
+        {
+            stage(Stage::CodeMismatch);
+            return result;
         }
     }
     // 旧候选的两处全局 VT 跳转已撤回；不把混合策略误报为新模式已生效。
@@ -540,7 +539,11 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
     renderRequested = false;
     submitGuard     = checkKernelArgument("-NRedDisplayFix");
     legacyBlend = renderRequested = submitGuard;
-    computeScratch = srdShared = submitGuard && currentKernelVersion().majorMatches(MACOS_26);
+    // scratch/srdShared 用的是 26.0 时代的机器码形状，在 26.7.x 上语义已变，因此默认关闭，
+    // 只有显式 -NRedScratch 才启用；-NRedDisplayFix 只负责门（LegacyBlend）与 SubmitGuard。
+    const bool scratchRequested = checkKernelArgument("-NRedScratch");
+    computeScratch = srdShared = submitGuard && currentKernelVersion().majorMatches(MACOS_26)
+                                && scratchRequested;
     NRed::singleton().setProp32("NRedDisplayFixVersion", 2);
     NRed::singleton().setProp32("NRedSubmitGuardVersion", 1);
     NRed::singleton().setProp32("NRedSubmitGuardRevision", 6);

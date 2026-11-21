@@ -1,10 +1,11 @@
 # 修复功能启动参数
 
-本版只使用以下三个入口，不兼容此前的修复启动参数。
+本版只使用以下入口，不兼容此前的修复启动参数。
 
 | 参数 | 功能 | 省略时 |
 | --- | --- | --- |
-| `-NRedDisplayFix` | 花屏／卡顿修复，包含 SubmitGuard；按系统选择渲染补丁 | 显示修复全部关闭 |
+| `-NRedDisplayFix` | 花屏／卡顿修复，包含 SubmitGuard 与 LegacyBlend 门修复 | 显示修复全部关闭 |
+| `-NRedScratch` | 在 26 上额外启用 SrdShared 与 ComputeScratch（26.0 形状机器码，语义未在 26.7.x 验证过） | 保持关闭 |
 | `-NRedVideoFix` | VCN 硬件视频加速，包含现有解码和编码路径 | VCN 桥接关闭 |
 | `NRedECFix=1` | 使用固件报告的 EC 背光来源 | EC 服务关闭 |
 
@@ -18,8 +19,11 @@
 `=2` 沿用强制模式，仍须核验固件调用结果和报告来源；本机固件的来源读取固定返回 2，
 不能仅凭该值证明控制权切换。`=0`、其他无效值或省略参数均不启动 EC 服务。
 
-显示开关在 macOS 14/15 启用 LegacyBlend 和 SubmitGuard，在 26 启用
-SrdShared、LegacyBlend、ComputeScratch 和 SubmitGuard，保留原生同步策略，不再启用 ImmediateSync。
+显示开关在 macOS 14/15 启用 LegacyBlend 和 SubmitGuard；在 26 启用提交守卫与 LegacyBlend，
+SrdShared、ComputeScratch 需额外加 `-NRedScratch` 才启用（其数据是 26.0 形状，26.7.x 语义未验证），
+保留原生同步策略，不再启用 ImmediateSync。
+26 的 LegacyBlend 是两条协同写入：放行能力位门（`74 28` → `90 90`）并把 `sete cl` 改为
+`xor ecx,ecx`（`0F 94 C1` → `31 C9 90`），结果只对双源混合禁用双 quad。
 `NRedDisplayFixVersion=2` 标记这个组合；`NRedImmediateSync*` 继续作为历史页面事务诊断名称，
 `NRedImmediateSyncDisabled=1` 表示立即同步修复未启用。
 **本版不含 HDRIntegerFilter 候选的运行代码与补丁数据。**
