@@ -40,6 +40,7 @@ namespace
     UInt32                            seenStages{0}, appliedCount{0}, errorCount{0};
     bool                              fairPlayDriverOnly{false};
     bool                              decodeGuard{true};
+    bool                              legacyNoVCNUser{false}, legacyNoFairPlay{false}, legacyNoGuard{false};
     UInt32                            decodeGuardApplied{0}, decodeGuardRejected{0};
     const UserVideoDecodeData::Patch* devicePatches{nullptr};
     const UserLegacyCompat::Profile*  legacyProfile{nullptr};
@@ -350,7 +351,7 @@ namespace
             return result;
         }
         // 解码规格守卫独立于渲染修复与 FairPlay 权限：只要缓存与镜像对得上就在本进程装一次。
-        if (decodeGuard) {
+        if (decodeGuard && !(legacyProfile && legacyNoGuard)) {
             if (auto map = getTaskMap(current_task())) {
                 bool       fresh{false};
                 const auto installed = installDecodeGuard(map, base, fresh);
@@ -410,7 +411,12 @@ namespace
             NRed::singleton().setProp32("NRedVCNUserDynamicReads", dynamicBuffer.plan->reads);
         }
 
-        if (fairPlayDecode) {
+        if (legacyProfile && legacyNoVCNUser) {
+            NRed::singleton().setProp32("NRedVCNUserLegacySkipped", 1);
+            return result;
+        }
+
+        if (fairPlayDecode && !(legacyProfile && legacyNoFairPlay)) {
             const auto mask = legacyProfile ? legacyProfile->fairPlayMask : FairPlayDecodeMask;
             if (!selectFairPlayDecode(base, patches, patchCount, legacyPatches, mask)) {
                 stage(Stage::CodeMismatch, fairPlayPID);
@@ -525,6 +531,11 @@ void UserVideoDecode::init(KernelPatcher& patcher)
 {
     fairPlayDriverOnly = false;
     if (!checkKernelArgument("-NRedVideoFix")) { return; }
+    // 旧系统（14/15）用 legacyProfile 里的静态补丁数据，与 26 的动态解析路径互为独立。
+    // 下列开关只对 legacyProfile 生效，26 上完全无影响，便于在 14 上分组二分定位挂死来源。
+    legacyNoVCNUser = checkKernelArgument("-NRedNoVCNUserLegacy");
+    legacyNoFairPlay = checkKernelArgument("-NRedNoDRMVideoLegacy");
+    legacyNoGuard    = checkKernelArgument("-NRedNoDecodeGuardLegacy");
     decodeGuard = !checkKernelArgument("-NRedNoDecodeGuard");
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);

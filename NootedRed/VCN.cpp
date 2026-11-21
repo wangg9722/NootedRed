@@ -259,7 +259,9 @@ namespace
 
 void VCN::init()
 {
-    requested = checkKernelArgument("-NRedVideoFix");
+    // -NRedNoVCNEngine：仅关闭本地 VCN 引擎分配（保留用户态补丁），用于在旧系统上二分定位挂死来源。
+    requested = checkKernelArgument("-NRedVideoFix") && !checkKernelArgument("-NRedNoVCNEngine");
+    if (checkKernelArgument("-NRedVideoFix") && !requested) { NRed::singleton().setProp32("NRedVCNEngineDisabled", 1); }
     if (requested) { lilu.onKextLoadForce(&x6000); }
 }
 bool VCN::ready()
