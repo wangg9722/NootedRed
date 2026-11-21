@@ -532,11 +532,19 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     fairPlayDriverOnly = false;
     if (!checkKernelArgument("-NRedVideoFix")) { return; }
     // 旧系统（14/15）用 legacyProfile 里的静态补丁数据，与 26 的动态解析路径互为独立。
-    // 下列开关只对 legacyProfile 生效，26 上完全无影响，便于在 14 上分组二分定位挂死来源。
-    legacyNoVCNUser = checkKernelArgument("-NRedNoVCNUserLegacy");
-    legacyNoFairPlay = checkKernelArgument("-NRedNoDRMVideoLegacy");
-    legacyNoGuard    = checkKernelArgument("-NRedNoDecodeGuardLegacy");
+    // 开关命名：legacy 作用域的开关一律把 Legacy 放到最前（-NRedLegacy*），
+    // 与 26 侧开关（-NRedVideoFix / -NRedNoDecodeGuard / ...）互不为前缀。
+    // 原因：Lilu checkKernelArgument 走 PE_parse_boot_arg，是前缀匹配，后缀式命名会让
+    // -NRedNoDecodeGuardLegacy 顺带命中 -NRedNoDecodeGuard，把 26 上的守卫一起关掉。
+    legacyNoVCNUser  = checkKernelArgument("-NRedLegacyNoVCNUser");
+    legacyNoFairPlay = checkKernelArgument("-NRedLegacyNoDRMVideo");
+    // NRedLegacyNoDecodeGuard = true：低版本默认不装解码守卫
+    // （14 上守卫会让 VCN 解码 fence 永不 retire）。不做取反、不留反向开关。
+    legacyNoGuard = true;
     decodeGuard = !checkKernelArgument("-NRedNoDecodeGuard");
+    // 低版本（14.x = 23、15.x = 24）上 legacyNoGuard 为 true，等价于 NoDecodeGuard 打开，
+    // 这样下面的门控与后续使用逻辑完全不用改。
+    if (legacyNoGuard && currentKernelVersion().major() <= MACOS_15_X.major()) { decodeGuard = false; }
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
     const auto  rejected   = VCNCapabilities::rejection(deviceID, currentKernelVersion());
