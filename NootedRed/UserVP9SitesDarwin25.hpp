@@ -1,19 +1,10 @@
 // 由 tools/gen_vp9_sites.py 从参考实现的数据集生成；本文件只保留偏移与字节约束。
 // 数据来源见 docs/vp9-hw-decode-analysis.md 的致谢一节。
 #pragma once
-#include <IOKit/IOTypes.h>
+#include <UserVP9Site.hpp>
 
 namespace UserVP9SitesDarwin25
 {
-    struct Site
-    {
-        UInt64       offset;
-        UInt32       size;
-        UInt32       patchSize;
-        const UInt8* original;
-        const UInt8* patched;
-    };
-
     inline constexpr UInt8 UUID[] = {
         0x5A, 0x3D, 0xA5, 0x75, 0xF0, 0x2E, 0x33, 0xDC, 0x9B, 0x14, 0xF6, 0x63, 0x05, 0x00, 0x11, 0xE6
     };
@@ -2091,7 +2082,7 @@ namespace UserVP9SitesDarwin25
         0xFE, 0xFF, 0x90,
     };
 
-    inline constexpr Site Sites[] = {
+    inline constexpr UserVP9::Site Sites[] = {
         {0x310B5DC14ULL, sizeof(Site0Original), 31U, Site0Original, Site0Patched},
         {0x310B15E94ULL, sizeof(Site1Original), 5U, Site1Original, Site1Patched},
         {0x310B0DD90ULL, sizeof(Site2Original), 5U, Site2Original, Site2Patched},
@@ -2125,4 +2116,5 @@ namespace UserVP9SitesDarwin25
     inline constexpr UInt32 SiteCount = sizeof(Sites) / sizeof(Sites[0]);
     inline constexpr UInt32 LargestSite = 10220;
     inline constexpr UInt32 LargestPatch = 512;
+    inline constexpr UserVP9::Table table{UUID, SiteCount, Sites};
 }    // namespace UserVP9SitesDarwin25

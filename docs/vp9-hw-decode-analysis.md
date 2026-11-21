@@ -179,3 +179,12 @@ VT 会话是否真正落到 VCN、`vdec_mode.swift` / Chrome 侧表现），异�
 - 观测属性（写在 IGPU 上）：`NRedVP9State`（0=Off 1=Resolving 2=Ready 3=Failed）、`NRedVP9Applied`（已安装进程数）、
   `NRedVP9Published`、`NRedVP9Withdrawn`、`NRedVP9MismatchSite`、`NRedVP9UUIDMismatch`、`NRedVP9LastVMError`。
 - 首飞门槛：必须显式 `-NRedVP9` 才启用（`-NRedNoVP9` 强制关闭），默认不改变现有系统行为。
+
+### 多版本的一份 kext
+
+- 新增 `NootedRed/UserVP9Site.hpp`：站点表公共类型（`Site` / `Table`），各版本数据表共用同一结构。
+- 运行时按内核版本选表：`Tahoe → UserVP9SitesDarwin25`、`Sonoma → UserVP9SitesDarwin23`；
+  没有对应版本的表就完全不启用（不会退化成猜测偏移）。
+- Darwin 23（14.8.9 / 23J631，UUID `4C1441FD8A543DC2863D49110B946A25`）的数据表在 work1 上生成：
+  31 个站点全部唯一解析，输出 `NootedRed/UserVP9SitesDarwin23.hpp`。
+- 同一个 kext 二进制同时包含两张表，靠 UUID 与逐站点字节校验在运行时决定是否可用。

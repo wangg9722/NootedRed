@@ -121,6 +121,8 @@
 		EF0400020000000000000105 /* UserVP9.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = UserVP9.cpp; sourceTree = "<group>"; };
 		EF0400020000000000000106 /* UserVP9.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVP9.hpp; sourceTree = "<group>"; };
 		EF0400020000000000000107 /* UserVP9SitesDarwin25.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVP9SitesDarwin25.hpp; sourceTree = "<group>"; };
+		EF0400020000000000000108 /* UserVP9SitesDarwin23.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVP9SitesDarwin23.hpp; sourceTree = "<group>"; };
+		EF0400020000000000000109 /* UserVP9Site.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVP9Site.hpp; sourceTree = "<group>"; };
 		EF0400020000000000000006 /* UserVideoDecode.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = UserVideoDecode.hpp; sourceTree = "<group>"; };
 		EF0400020000000000000005 /* UserVideoDecode.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = UserVideoDecode.cpp; sourceTree = "<group>"; };
 		EF0400020000000000000004 /* VCNKernelData.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = VCNKernelData.hpp; sourceTree = "<group>"; };
@@ -332,6 +334,8 @@
 				407068652E966678004E0761 /* Personalities */,
 				408B3DD62CDFA41A00CAE5D2 /* Regs */,
 				EF0400020000000000000001 /* UserSurfaceSync.cpp */,
+				EF0400020000000000000109 /* UserVP9Site.hpp */,
+				EF0400020000000000000108 /* UserVP9SitesDarwin23.hpp */,
 				EF0400020000000000000107 /* UserVP9SitesDarwin25.hpp */,
 				EF0400020000000000000106 /* UserVP9.hpp */,
 				EF0400020000000000000105 /* UserVP9.cpp */,

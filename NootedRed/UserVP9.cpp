@@ -1,7 +1,7 @@
-// 硬件 VP9 解码站点安装。
+// 硬件 VP9 解码站点安装（一份 kext 支持多个系统版本，按内核版本选表）。
 //
 // 站点数据（偏移 + 原始字节 + 补丁字节）由 tools/gen_vp9_sites.py 从参考实现的公开数据集生成，
-// 生成时已经用本机真实 dyld 缓存逐站点做过唯一性校验，并在运行时再次校验缓存 UUID 与原始字节。
+// 生成时已经用对应机器的真实 dyld 缓存逐站点做过唯一性校验；运行时再校验主缓存 UUID 与原始字节。
 // 数据来源与致谢见 docs/vp9-hw-decode-analysis.md。
 
 #include <Headers/kern_api.hpp>
@@ -10,8 +10,11 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <NRed.hpp>
+#include <PenguinWizardry/KernelVersion.hpp>
 #include <UserPatchMemory.hpp>
 #include <UserVP9.hpp>
+#include <UserVP9Site.hpp>
+#include <UserVP9SitesDarwin23.hpp>
 #include <UserVP9SitesDarwin25.hpp>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSDictionary.h>
@@ -23,37 +26,36 @@ namespace
     using UserPatchMemory::Page;
 
     // 与 UserSurfaceSyncResolver 相同的用户地址上限，用于挡住越界地址。
-    constexpr UInt64 UserLimit = 0x00007FFFFFFFFFFFULL;
+    constexpr UInt64 UserLimit    = 0x00007FFFFFFFFFFFULL;
+    constexpr UInt32 MaxSites     = 64;
+    constexpr UInt32 PageCapacity = 24;
 
     enum class VP9State : UInt32
     {
-        Off      = 0,
+        Off       = 0,
         Resolving = 1,
-        Ready    = 2,
-        Failed   = 3,
+        Ready     = 2,
+        Failed    = 3,
     };
-
-    constexpr UInt32 PageCapacity = 24;
-    constexpr UInt32 SiteCount    = UserVP9SitesDarwin25::SiteCount;
-    static_assert(SiteCount <= 64, "站点数量超出预期");
 
     struct Context
     {
-        IOLock* lock{nullptr};
-        UInt8*  saved{nullptr};
-        UInt32  spanStart[SiteCount]{};
-        Page    pages[PageCapacity]{};
-        UInt32  pageCount{0};
-        UInt32  applied{0};
-        bool    published{false};
-        bool    withdrawn{false};
+        IOLock*               lock{nullptr};
+        UInt8*                saved{nullptr};
+        UInt32                spanStart[MaxSites]{};
+        Page                  pages[PageCapacity]{};
+        UInt32                pageCount{0};
+        UInt32                applied{0};
+        const UserVP9::Table* table{nullptr};
+        bool                  published{false};
+        bool                  withdrawn{false};
     };
 
-    Context context;
+    Context  context;
     VP9State state{VP9State::Off};
     bool     enabled{false};
 
-    inline UInt32 spanOf(const UserVP9SitesDarwin25::Site& site)
+    inline UInt32 spanOf(const UserVP9::Site& site)
     {
         return site.size > site.patchSize ? site.size : site.patchSize;
     }
@@ -64,12 +66,25 @@ namespace
         NRed::singleton().setProp32("NRedVP9State", static_cast<UInt32>(value));
     }
 
+    // 同一份 kext 内按内核版本选表：每张表都用对应版本自己的 dyld 缓存生成，UUID 不符即拒绝。
+    const UserVP9::Table* selectTable()
+    {
+        switch (getKernelVersion()) {
+            case KernelVersion::Tahoe:
+                return &UserVP9SitesDarwin25::table;
+            case KernelVersion::Sonoma:
+                return &UserVP9SitesDarwin23::table;
+            default:
+                return nullptr;
+        }
+    }
+
     IOService* findVideoAccelerator()
     {
         // 只认真正挂着 AMDRadeonVADriver2 的加速器服务，避免把能力键发到别的显卡上。
         auto* matching = IOService::serviceMatching("IOAccelerator");
         if (matching == nullptr) { return nullptr; }
-        IOService*  found = nullptr;
+        IOService*  found    = nullptr;
         OSIterator* iterator = IOService::getMatchingServices(matching);
         if (iterator != nullptr) {
             OSObject* entry = nullptr;
@@ -98,7 +113,7 @@ namespace
         if (context.published || context.withdrawn) { return; }
         auto* service = findVideoAccelerator();
         if (service == nullptr) { return; }
-        auto* profiles = OSArray::withCapacity(2);
+        auto* profiles   = OSArray::withCapacity(2);
         auto* dictionary = OSDictionary::withCapacity(1);
         if (profiles == nullptr || dictionary == nullptr) {
             if (profiles) { profiles->release(); }
@@ -136,15 +151,21 @@ namespace
     {
         NRed::singleton().setProp32("NRedVP9LastVMError", static_cast<UInt32>(value == 0 ? 1 : value));
     }
-}
+}    // namespace
+
+bool UserVP9::isEnabled() { return enabled; }
 
 void UserVP9::init()
 {
-    // 首飞阶段必须显式 -NRedVP9 才启用；字节站点全部通过校验后才对外发布能力键。
-    if (getKernelVersion() != KernelVersion::Tahoe || checkKernelArgument("-NRedNoVP9")
-        || !checkKernelArgument("-NRedVP9"))
-    {
+    // 首飞阶段必须显式 -NRedVP9 才启用；-NRedNoVP9 优先级最高。
+    if (checkKernelArgument("-NRedNoVP9") || !checkKernelArgument("-NRedVP9")) {
         setState(VP9State::Off);
+        return;
+    }
+    context.table = selectTable();
+    if (context.table == nullptr || context.table->siteCount == 0 || context.table->siteCount > MaxSites) {
+        setState(VP9State::Off);
+        SYSLOG("UserVP9", "No site table for Darwin %u", currentKernelVersion().major());
         return;
     }
     context.lock = IOLockAlloc();
@@ -153,9 +174,9 @@ void UserVP9::init()
         return;
     }
     UInt32 total = 0;
-    for (UInt32 i = 0; i < SiteCount; ++i) {
+    for (UInt32 i = 0; i < context.table->siteCount; ++i) {
         context.spanStart[i] = total;
-        total += spanOf(UserVP9SitesDarwin25::Sites[i]);
+        total += spanOf(context.table->sites[i]);
     }
     context.saved = static_cast<UInt8*>(IOMalloc(total));
     if (context.saved == nullptr) {
@@ -164,29 +185,35 @@ void UserVP9::init()
     }
     enabled = true;
     setState(VP9State::Resolving);
-    SYSLOG("UserVP9", "VP9 patch table armed: %u sites, %u bytes of saved bytes", SiteCount, total);
+    NRed::singleton().setProp32("NRedVP9SiteCount", context.table->siteCount);
+    SYSLOG("UserVP9", "VP9 patch table armed: %u sites, %u bytes saved, Darwin %u", context.table->siteCount,
+           total, currentKernelVersion().major());
 }
-
-bool UserVP9::isEnabled() { return enabled; }
 
 void UserVP9::apply(const UInt64 base, const UInt8* uuid, const ReadUser read, const WriteUser write,
                     const vm_map_t map, const RegionQuery query)
 {
     using namespace UserPatchMemory;
-    if (!enabled || context.lock == nullptr || context.saved == nullptr) { return; }
+    if (!enabled || context.lock == nullptr || context.saved == nullptr || context.table == nullptr) { return; }
     if (state == VP9State::Failed || state == VP9State::Off) { return; }
     if (read == nullptr || write == nullptr || map == nullptr || query == nullptr) { return; }
-    if (uuid == nullptr || memcmp(uuid, UserVP9SitesDarwin25::UUID, sizeof(UserVP9SitesDarwin25::UUID)) != 0) {
+    if (uuid == nullptr || memcmp(uuid, context.table->uuid, sizeof(UInt8) * 16) != 0) {
         NRed::singleton().setProp32("NRedVP9UUIDMismatch", 1);
         return;
     }
 
     IOLockLock(context.lock);
 
-    // 先探一下最小站点所在的可读性：没有映射 AMDRadeonVADriver2 的进程会在这里直接返回，
-    // 不需要逐个进程做 26 KB 的读取与写入。
+    const auto siteCount = context.table->siteCount;
+    if (siteCount < 2) {
+        IOLockUnlock(context.lock);
+        return;
+    }
+
+    // 先探读一个站点：没有映射 AMDRadeonVADriver2 的进程会在这里直接返回，
+    // 不需要逐个进程做几十 KB 的读取与写入。
     {
-        const auto& probe = UserVP9SitesDarwin25::Sites[1];
+        const auto& probe = context.table->sites[1];
         UInt8       bytes[16];
         if (probe.size < sizeof(bytes) || read(base + probe.offset, bytes, sizeof(bytes)) != 0) {
             IOLockUnlock(context.lock);
@@ -195,10 +222,10 @@ void UserVP9::apply(const UInt64 base, const UInt8* uuid, const ReadUser read, c
     }
 
     UInt32 originals = 0, patched = 0;
-    for (UInt32 i = 0; i < SiteCount; ++i) {
-        const auto& site     = UserVP9SitesDarwin25::Sites[i];
-        const auto  address  = base + site.offset;
-        auto* const saved    = context.saved + context.spanStart[i];
+    for (UInt32 i = 0; i < siteCount; ++i) {
+        const auto&  site    = context.table->sites[i];
+        const auto   address = base + site.offset;
+        auto* const  saved   = context.saved + context.spanStart[i];
         const UInt32 span    = spanOf(site);
         if (address >= UserLimit - span) { break; }
         if (read(address, saved, span) != 0) {
@@ -211,7 +238,7 @@ void UserVP9::apply(const UInt64 base, const UInt8* uuid, const ReadUser read, c
         } else if (memcmp(saved, site.patched, site.patchSize) == 0) {
             ++patched;
         } else {
-            // 站点字节和预期不符：说明驱动版本或缓存布局变了，撤回能力键，保持软解路径可用。
+            // 站点字节与预期不符：驱动版本或缓存布局变了，撤回能力键，保持软解路径可用。
             NRed::singleton().setProp32("NRedVP9MismatchSite", i);
             setState(VP9State::Failed);
             IOLockUnlock(context.lock);
@@ -219,23 +246,24 @@ void UserVP9::apply(const UInt64 base, const UInt8* uuid, const ReadUser read, c
             return;
         }
     }
-    if (patched == SiteCount) {
+    if (patched == siteCount) {
         setState(VP9State::Ready);
         publishCapabilities();
         IOLockUnlock(context.lock);
         return;
     }
-    if (originals != SiteCount) {
+    if (originals != siteCount) {
         NRed::singleton().setProp32("NRedVP9Mixed", 1);
         IOLockUnlock(context.lock);
         return;
     }
 
     UInt32 pageCount = 0;
-    for (UInt32 i = 0; i < SiteCount; ++i) {
-        const auto&  site    = UserVP9SitesDarwin25::Sites[i];
-        const UInt32 span    = site.patchSize;
-        if (!collectPages(context.pages, pageCount, base + site.offset, span) || pageCount > PageCapacity) {
+    for (UInt32 i = 0; i < siteCount; ++i) {
+        const auto& site = context.table->sites[i];
+        if (!collectPages(context.pages, pageCount, base + site.offset, site.patchSize)
+            || pageCount > PageCapacity)
+        {
             NRed::singleton().setProp32("NRedVP9PageOverflow", pageCount);
             IOLockUnlock(context.lock);
             return;
@@ -262,13 +290,13 @@ void UserVP9::apply(const UInt64 base, const UInt8* uuid, const ReadUser read, c
         }
     }
     UInt32 written = 0;
-    for (UInt32 i = 0; i < SiteCount; ++i) {
-        const auto& site    = UserVP9SitesDarwin25::Sites[i];
+    for (UInt32 i = 0; i < siteCount; ++i) {
+        const auto& site    = context.table->sites[i];
         const auto  address = base + site.offset;
         if (write(site.patched, address, site.patchSize) != 0) {
             NRed::singleton().setProp32("NRedVP9WriteFailed", i + 1);
             for (UInt32 j = 0; j < written; ++j) {
-                const auto& done = UserVP9SitesDarwin25::Sites[j];
+                const auto& done = context.table->sites[j];
                 write(context.saved + context.spanStart[j], base + done.offset, done.patchSize);
             }
             restorePages(map, context.pages, pageCount, reportError);
