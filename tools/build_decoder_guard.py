@@ -10,11 +10,15 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from metal_cache import macho  # noqa: E402
 
-# AMDRadeonVADriver2 在 dyld 共享缓存内的镜像地址（缓存 base 0x7FF800000000）。
-IMAGE_ADDRESS = 0x7FFB10B00000
 CACHE_BASE = 0x7FF800000000
-# VADecoder::Init 在镜像内的偏移。
-ENTRY_IN_IMAGE = 0x7CC6
+# 各版本 dyld 缓存里 AMDRadeonVADriver2 的 VADecoder::Init 入口偏移（相对缓存 base）。
+# 运行期不去比版本号，而是逐个候选读入口字节，命中 EntryOriginal 的那个才用。
+#   26.7.3 / 25G342 : 镜像 0x7FFB10B00000，Init 镜像内 0x7CC6
+#   14.8.9 / 23J631 : 镜像 0x7FFB0339C000，Init 镜像内 0x3FA4
+CANDIDATES = [
+    ("macOS 26.7.3", 0x7FFB10B00000 - CACHE_BASE + 0x7CC6),
+    ("macOS 14.8.9", 0x7FFB0339C000 - CACHE_BASE + 0x3FA4),
+]
 # 入口前 24 字节（前 6 条指令，止于 0x18 的指令边界）。
 ENTRY_ORIGINAL = bytes.fromhex(
     "554889e5415653" "89b728010000" "48c787f0000000 00000000"
@@ -34,7 +38,6 @@ def array(name: str, data: bytes) -> str:
 def main() -> None:
     if PATCH_SIZE < 14 or PATCH_SIZE > 64:
         raise SystemExit(f"补丁长度不支持：{PATCH_SIZE}")
-    cache_offset = IMAGE_ADDRESS - CACHE_BASE + ENTRY_IN_IMAGE
 
     WORK.mkdir(parents=True, exist_ok=True)
     obj = WORK / "vad_decode_guard.o"
@@ -52,14 +55,19 @@ def main() -> None:
 
     header = "// 由 tools/build_decoder_guard.py 生成，不手工编辑。\n#pragma once\n#include <IOKit/IOTypes.h>\n"
     header += "namespace UserDecoderGuardData {\n"
-    header += f"inline constexpr UInt64 CacheOffset = 0x{cache_offset:X}ULL;\n"
+    header += "inline constexpr UInt64 Offsets[] = {\n"
+    for label, offset in CANDIDATES:
+        header += f"    0x{offset:X}ULL, // {label}\n"
+    header += "};\n"
+    header += "inline constexpr UInt32 OffsetCount = sizeof(Offsets) / sizeof(Offsets[0]);\n"
     header += f"inline constexpr UInt32 PatchSize = {PATCH_SIZE};\n"
     header += array("EntryOriginal", ENTRY_ORIGINAL)
     header += f"inline constexpr UInt32 PayloadJumpOffset = {jump_offset};\n"
     header += array("Payload", payload)
     header += "} // namespace UserDecoderGuardData\n"
     OUT.write_text(header)
-    print(f"decoder guard: entry cache offset 0x{cache_offset:X} payload {len(payload)} bytes "
+    print(f"decoder guard: {len(CANDIDATES)} offsets "
+          f"({', '.join(hex(o) for _, o in CANDIDATES)}) payload {len(payload)} bytes "
           f"jump offset {jump_offset} -> {OUT}")
 
 

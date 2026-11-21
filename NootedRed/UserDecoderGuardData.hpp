@@ -2,7 +2,11 @@
 #pragma once
 #include <IOKit/IOTypes.h>
 namespace UserDecoderGuardData {
-inline constexpr UInt64 CacheOffset = 0x310B07CC6ULL;
+inline constexpr UInt64 Offsets[] = {
+    0x310B07CC6ULL, // macOS 26.7.3
+    0x30339FFA4ULL, // macOS 14.8.9
+};
+inline constexpr UInt32 OffsetCount = sizeof(Offsets) / sizeof(Offsets[0]);
 inline constexpr UInt32 PatchSize = 24;
 inline constexpr UInt8 EntryOriginal[] = {
     0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x89, 0xB7, 0x28, 0x01, 0x00,

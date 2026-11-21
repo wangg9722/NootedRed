@@ -117,37 +117,52 @@ namespace
     {
         using namespace UserDecoderGuardData;
         fresh = false;
-        if (base >= UserSharedCache::UserLimit || CacheOffset >= UserSharedCache::UserLimit - base
-            || PatchSize > UserSharedCache::UserLimit - base - CacheOffset)
-        {
-            return KERN_INVALID_ADDRESS;
-        }
-        const UInt64 entry     = base + CacheOffset;
-        const UInt64 entryPage = entry & ~static_cast<UInt64>(PAGE_SIZE - 1);
-        UInt8        current[PatchSize];
-        if (readUser(entry, current, sizeof(current)) != 0) { return KERN_INVALID_ADDRESS; }
+        if (base >= UserSharedCache::UserLimit) { return KERN_INVALID_ADDRESS; }
+
         static constexpr UInt8 patchedPrefix[6] = {0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};
-        const UInt64           continuation     = entry + PatchSize;
-        if (memcmp(current, patchedPrefix, sizeof(patchedPrefix)) == 0) {
-            UInt64 target{0};
-            memcpy(&target, current + 6, sizeof(target));
-            if (target == 0 || (target & (PAGE_SIZE - 1)) != 0
-                || target >= UserSharedCache::UserLimit - sizeof(Payload))
-            {
-                return KERN_INVALID_ARGUMENT;
+        // 各版本缓存里 VADecoder::Init 的偏移不同：只认入口 24 字节与原函数一致的那一个候选。
+        UInt64 entry{0};
+        UInt8  current[PatchSize];
+        for (UInt32 i = 0; i < OffsetCount; ++i) {
+            const UInt64 offset = Offsets[i];
+            if (offset >= UserSharedCache::UserLimit - base || PatchSize > UserSharedCache::UserLimit - base - offset) {
+                continue;
             }
-            UInt8 existing[sizeof(Payload)], expected[sizeof(Payload)];
-            memcpy(expected, Payload, sizeof(expected));
-            memcpy(expected + PayloadJumpOffset, &continuation, sizeof(continuation));
-            vm_prot_t protection{VM_PROT_NONE};
-            return readUser(target, existing, sizeof(existing)) == 0
-                           && memcmp(existing, expected, sizeof(existing)) == 0 && leafProtection(map, target, protection)
-                           && protection == (VM_PROT_READ | VM_PROT_EXECUTE) ?
-                       KERN_SUCCESS :
-                       KERN_INVALID_ARGUMENT;
+            const UInt64 candidate = base + offset;
+            UInt8        bytes[PatchSize];
+            if (readUser(candidate, bytes, sizeof(bytes)) != 0) { continue; }
+            if (memcmp(bytes, EntryOriginal, sizeof(bytes)) == 0) {
+                entry = candidate;
+                memcpy(current, bytes, sizeof(current));
+                NRed::singleton().setProp32("NRedDecodeGuardOffsetIndex", i);
+                break;
+            }
+            if (memcmp(bytes, patchedPrefix, sizeof(patchedPrefix)) == 0) {
+                UInt64 target{0};
+                memcpy(&target, bytes + 6, sizeof(target));
+                if (target == 0 || (target & (PAGE_SIZE - 1)) != 0
+                    || target >= UserSharedCache::UserLimit - sizeof(Payload))
+                {
+                    continue;
+                }
+                UInt8 existing[sizeof(Payload)], expected[sizeof(Payload)];
+                memcpy(expected, Payload, sizeof(expected));
+                const UInt64 continuation = candidate + PatchSize;
+                memcpy(expected + PayloadJumpOffset, &continuation, sizeof(continuation));
+                vm_prot_t protection{VM_PROT_NONE};
+                if (readUser(target, existing, sizeof(existing)) == 0 && memcmp(existing, expected, sizeof(existing)) == 0
+                    && leafProtection(map, target, protection) && protection == (VM_PROT_READ | VM_PROT_EXECUTE))
+                {
+                    NRed::singleton().setProp32("NRedDecodeGuardOffsetIndex", i);
+                    return KERN_SUCCESS;
+                }
+            }
         }
-        if (memcmp(current, EntryOriginal, sizeof(current)) != 0) { return KERN_INVALID_ARGUMENT; }
-        vm_prot_t protection{VM_PROT_NONE};
+        if (entry == 0) { return KERN_INVALID_ARGUMENT; }
+
+        const UInt64 entryPage = entry & ~static_cast<UInt64>(PAGE_SIZE - 1);
+        const UInt64 continuation = entry + PatchSize;
+        vm_prot_t    protection{VM_PROT_NONE};
         if ((entry & (PAGE_SIZE - 1)) + sizeof(current) > PAGE_SIZE || !leafProtection(map, entryPage, protection)
             || protection != (VM_PROT_READ | VM_PROT_EXECUTE))
         {
@@ -184,7 +199,7 @@ namespace
             vm_deallocate(map, page, PAGE_SIZE);
             return result;
         }
-        const auto written = writeUser(patch, entry, sizeof(patch));
+        const auto written    = writeUser(patch, entry, sizeof(patch));
         bool       rolledBack = false;
         if (written != 0) { rolledBack = writeUser(current, entry, sizeof(current)) == 0; }
         auto restored = vm_protect(map, entryPage, PAGE_SIZE, FALSE, protection);
