@@ -48,3 +48,4 @@
 `video_addr_convert.s`，由生成器经 `compile_payload` 内联。
 
 `fixtures/`：模板与参考数据（`legacy-compat.json`、entitlement、EC 背光模板）。
+- `vdec_info.swift` — 打印视频编码参数（profile / tier / chroma / 位深）并分别测试「强制硬解」「允许软解」两种 VT 会话能否创建，用来判断某文件是否被 VideoToolbox 接受。
