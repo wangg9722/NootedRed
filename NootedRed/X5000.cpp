@@ -316,8 +316,11 @@ bool X5000::allocateHWEngines(void* const self)
         auto* engine = VCN::allocateEngine();
         // 复用本版本的引擎数组基址和原生类型枚举，不另设固定的 VCN 字段偏移。
         (singleton().pm4EngineField + kAMDHWEngineTypeVCN0 * sizeof(void*))(self) = engine;
-        if (!engine) { singleton().hasVCN0Field(self) = false; }
     }
+    // 能力位只由「引擎是否真的存在」决定（见 VCN::capability），
+    // 不再在这里单独写 false，避免和 wrapSetupAndInitializeHWCapabilities 互相覆盖。
+    singleton().hasVCN0Field(self) = VCN::capability();
+    NRed::singleton().setProp32("NRedVCNCapabilityFlag", singleton().hasVCN0Field(self) ? 1 : 0);
 
     return true;
 }
@@ -344,7 +347,8 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
     singleton().supportedDisplayCountField(self) = 4;
     singleton().hasUVD0Field(self)               = false;
     singleton().hasVCEField(self)                = false;
-    singleton().hasVCN0Field(self)               = VCN::ready();
+    singleton().hasVCN0Field(self)               = VCN::capability();
+    NRed::singleton().setProp32("NRedVCNCapabilityFlag", singleton().hasVCN0Field(self) ? 1 : 0);
     singleton().hasSDMAPagingQueueField(self)    = false;
     singleton().hasGetAllClockLimitsField(self)  = false;
     if (currentKernelVersion() >= MACOS_10_15) { singleton().dccDisplayableSupportField(self) = true; }

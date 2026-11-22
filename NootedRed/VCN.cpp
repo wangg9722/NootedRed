@@ -20,6 +20,8 @@ namespace
     KernelPatcher::KextInfo x6000{"com.apple.kext.AMDRadeonX6000",  &path, 1, {true}, {},
                                   KernelPatcher::KextInfo::Unloaded};
     bool                    requested{false}, has5000{false}, has6000{false}, hooks{false}, engineAllocated{false};
+    // 分配是否发生过：一旦尝试过，能力位就只认实际结果，不再退回 ready() 的意图值。
+    bool                    allocationAttempted{false};
     bool                    loadAttempted{false}, loadCompleted{false};
     mach_vm_address_t       acceleratorStartOriginal{0};
     mach_vm_address_t       safeCastOriginal{0}, newSharedOriginal{0}, newClientOriginal{0}, newVideoOriginal{0};
@@ -269,8 +271,19 @@ bool VCN::ready()
     return supported() && __atomic_load_n(&loadCompleted, __ATOMIC_ACQUIRE) && has5000 && has6000 && hooks;
 }
 bool  VCN::allocated() { return ready() && engineAllocated; }
+
+// 对外发布的「有没有 VCN0」唯一判据：
+//   已分配 → true；尝试过但失败 → false；还没尝试 → 用 ready() 表示的意图值。
+// 这样无论 setup… 和 allocateHWEngines 谁先跑，都不会把对方的结论反向覆盖。
+bool VCN::capability()
+{
+    if (engineAllocated) { return true; }
+    if (allocationAttempted) { return false; }
+    return ready();
+}
 void* VCN::allocateEngine()
 {
+    allocationAttempted = true;
     if (!ready()) {
         NRed::singleton().setProp32("NRedVCNAllocationSkipped", requested);
         return nullptr;
