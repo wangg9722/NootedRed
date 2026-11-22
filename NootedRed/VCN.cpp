@@ -41,6 +41,7 @@ namespace
                                        "IAMDHWChannel"};
     constexpr unsigned    lengths[] = {37, 35, 30, 28};
     UInt32                hardwareInitCount{0};
+    bool                  engineStartedFlag{false};
 
     bool supported()
     {
@@ -182,6 +183,10 @@ namespace
     {
         const auto result = reinterpret_cast<bool (*)(void*, UInt32)>(initHardwareOriginal)(self, channel);
         NRed::singleton().setProp32("NRedVCNLastHardwareInit", result);
+        if (result) {
+            __atomic_store_n(&engineStartedFlag, true, __ATOMIC_RELEASE);
+            NRed::singleton().setProp32("NRedVCNEngineStarted", 1);
+        }
         auto count = __atomic_fetch_add(&hardwareInitCount, 1U, __ATOMIC_RELAXED);
         if (count < 16) { SYSLOG("VCN", "initHardware channel=%u result=%u", channel, result); }
         return result;
@@ -269,6 +274,7 @@ bool VCN::ready()
     return supported() && __atomic_load_n(&loadCompleted, __ATOMIC_ACQUIRE) && has5000 && has6000 && hooks;
 }
 bool  VCN::allocated() { return ready() && engineAllocated; }
+bool  VCN::engineStarted() { return allocated() && __atomic_load_n(&engineStartedFlag, __ATOMIC_ACQUIRE); }
 void* VCN::allocateEngine()
 {
     if (!ready()) {
