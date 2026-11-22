@@ -68,7 +68,6 @@ void NRed::init()
         {
             singleton().processPatcher();
             UserSurfaceSync::init(patcher);
-            NRedAudio::singleton().init();
             UserVideoDecode::init(patcher);
             DriverInjector::singleton().processPatcher(patcher);
             PenguinWizardry::RuntimeMCManager::singleton().processPatcher(patcher);

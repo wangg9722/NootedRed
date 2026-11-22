@@ -39,8 +39,6 @@ public:
     // 由 NRed 初始化时调用：读取 -NRedAudioProbe / -NRedAudioApply 决定是否参与。
     //   -NRedAudioProbe：只做寄存器读取与属性发布，绝不写寄存器（先验证偏移安全）；
     //   -NRedAudioApply：完整编程（DTO + Azalia + AFMT + DP_SEC）。
-    void init();
-    bool enabled() const;
 
     // 事件驱动入口，不启动轮询线程。
     void onControllerPowerUp();
@@ -57,8 +55,6 @@ private:
     thread_call_t delayedProbeCall{nullptr};
     UInt32        settleRetries{0};
     bool          postLinkPassDone{false};
-    bool          active{false};
-    bool          probeOnly{false};
 
     void        scheduleDelayedProbe(UInt32 delayMs = 2000);
     static void delayedProbeCallback(thread_call_param_t param0, thread_call_param_t param1);

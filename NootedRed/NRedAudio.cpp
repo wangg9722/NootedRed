@@ -198,19 +198,6 @@ namespace
 
 static NRedAudio moduleInstance;
 
-bool NRedAudio::enabled() const { return this->active; }
-
-void NRedAudio::init()
-{
-    this->probeOnly = checkKernelArgument("-NRedAudioProbe");
-    // 默认开启（上游参考实现本来就无条件执行）；只有显式 -NRedNoAudio 才关闭。
-    this->active    = this->probeOnly || !checkKernelArgument("-NRedNoAudio");
-    NRed::singleton().setProp32("NRedAudioMode", this->active ? (this->probeOnly ? 1U : 2U) : 0U);
-    if (this->active) {
-        SYSLOG("NRedAudio", "HDMI/DP audio %s mode", this->probeOnly ? "probe(read-only)" : "apply");
-    }
-}
-
 NRedAudio& NRedAudio::singleton() { return moduleInstance; }
 
 auto NRedAudio::resolveDcnIpBlock() -> DcnIpBlock
@@ -278,8 +265,7 @@ void NRedAudio::scheduleDelayedProbe(const UInt32 delayMs)
 
 void NRedAudio::onControllerPowerUp()
 {
-    if (!this->active) { return; }
-    if (this->probeOnly) { this->probeTopology(); return; }
+    if (checkKernelArgument("-NRedNoAudio")) { return; }
     this->settleRetries    = 0;
     this->postLinkPassDone = false;
     this->probeTopology();
@@ -288,8 +274,7 @@ void NRedAudio::onControllerPowerUp()
 
 void NRedAudio::onLinkCapabilitiesReported()
 {
-    if (!this->active) { return; }
-    if (this->probeOnly) { this->probeTopology(); return; }
+    if (checkKernelArgument("-NRedNoAudio")) { return; }
     this->settleRetries    = 0;
     this->postLinkPassDone = false;
     this->probeTopology();
@@ -299,16 +284,8 @@ void NRedAudio::onLinkCapabilitiesReported()
 bool NRedAudio::configureAudio(const bool pulseDpSec)
 {
     const auto& nred = NRed::singleton();
-    if (this->probeOnly) { return true; }
-    const auto blk = resolveDcnIpBlock();
+    const auto  blk  = resolveDcnIpBlock();
     if (blk.gen == DcnGen::kUnknown || !nred.isMmioReady()) { return true; }
-    // 写入前先确认基址可读：整段读到 0xFFFFFFFF 说明 IP 块地址不成立，直接放弃，避免写错寄存器。
-    if (nred.readReg32(blk.dccgBase + kDcn21DccgAudioDtoSource) == 0xFFFFFFFFU
-        || nred.readReg32(blk.dcnBase + kDcn21DigBeCntl) == 0xFFFFFFFFU)
-    {
-        nred.setProp32("NRedAudioRegionInvalid", 1);
-        return true;
-    }
 
     // 枚举活跃的外接 IOFramebuffer（DP / HDMI），同时判断是否存在内屏。
     struct ExtFbInfo
@@ -439,7 +416,7 @@ void NRedAudio::probeTopology()
     const bool  debug = checkKernelArgument("-NRedDebug");
 
     nred.setProp32("NRedAudioDcnGen", static_cast<UInt32>(blk.gen));
-    (void)debug;
+    if (!debug) { return; }
 
     UInt32 fbCount = 0;
     if (auto* const match = IOService::serviceMatching("IOFramebuffer")) {
@@ -489,7 +466,6 @@ void NRedAudio::probeTopology()
     nred.setProp32("NRedAudioOTGMask", otgCtlMask);
     nred.setProp32("NRedAudioOTGMast", otgMenMask);
 
-    nred.setProp32("NRedAudioMmiReady", 1);
     char key[48];
     for (UInt32 dig = 0; dig < blk.maxDig; dig++) {
         const UInt32 off = dig * blk.digStride;
