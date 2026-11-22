@@ -260,6 +260,15 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
     PANIC_COND(!PenguinWizardry::PatternRouteRequest::routeAll(patcher, id, requests, slide, size), "X6000FB",
                "Failed to route symbols");
 
+    // 音频链路的唯一触发点是链路能力上报，与参考实现一致；路由失败则跳过（不影响无声以外的行为）。
+    KernelPatcher::RouteRequest linkInfoRequest{
+        "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer27reportCapabilities_LinkInfoEv", wrapReportCapabilitiesLinkInfo,
+        this->orgReportCapabilitiesLinkInfo};
+    if (!patcher.routeMultiple(id, &linkInfoRequest, 1, slide, size)) {
+        patcher.clearError();
+        SYSLOG("X6000FB", "Optional route reportCapabilities_LinkInfo unavailable; continuing");
+    }
+
     PenguinWizardry::JumpPatternRouteRequest atombiosRequests[] = {
         {"__ZN15AmdAtomVramInfo14createVramInfoEP15AmdAtomFwHelperj", wrapCreateVramInfo, this->orgCreateVramInfo,
          kCreateVramInfoCallPattern, kCreateVramInfoCallPatternMask, kCreateVramInfoCallPatternJumpInstOff},
@@ -593,12 +602,17 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     return ret;
 }
 
+IOReturn X6000FB::wrapReportCapabilitiesLinkInfo(void* const self)
+{
+    const auto ret = FunctionCast(wrapReportCapabilitiesLinkInfo, singleton().orgReportCapabilitiesLinkInfo)(self);
+    NRedAudio::singleton().onLinkCapabilitiesReported();
+    return ret;
+}
+
 void X6000FB::wrapDpReceiverPowerCtrl(void* const link, const bool powerOn)
 {
     FunctionCast(wrapDpReceiverPowerCtrl, singleton().orgDpReceiverPowerCtrl)(link, powerOn);
-    IOSleep(250);
-    // DP 链路重新上电/训练后，音频侧需要重新 latch（只在开启音频修复时触发）。
-    if (powerOn) { NRedAudio::singleton().onLinkCapabilitiesReported(); }
+    if (powerOn) { IOSleep(250); }
 }
 
 void* X6000FB::wrapCreateObjectInfo(void* const helper, const UInt32 tableOffset)
