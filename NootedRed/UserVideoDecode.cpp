@@ -540,11 +540,11 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     legacyNoFairPlay = checkKernelArgument("-NRedLegacyNoDRMVideo");
     // NRedLegacyNoDecodeGuard = true：低版本默认不装解码守卫
     // （14 上守卫会让 VCN 解码 fence 永不 retire）。不做取反、不留反向开关。
-    legacyNoGuard = true;
+    // 14/15 同样要装解码守卫：实测 14.8.9(23J631) 上关掉守卫后，解码一走 VCN 就
+    // FenceNotRetired（gpuRestart: VTDecoderXPCServ / VCN0Dec），随后 WindowServer 卡死。
+    // 守卫按 VADecoder::Init 的 24 字节特征选偏移（14 = 第 2 档候选），装好后正常。
+    legacyNoGuard = false;
     decodeGuard = !checkKernelArgument("-NRedNoDecodeGuard");
-    // 低版本（14.x = 23、15.x = 24）上 legacyNoGuard 为 true，等价于 NoDecodeGuard 打开，
-    // 这样下面的门控与后续使用逻辑完全不用改。
-    if (legacyNoGuard && currentKernelVersion().major() <= MACOS_15_X.major()) { decodeGuard = false; }
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
     const auto  rejected   = VCNCapabilities::rejection(deviceID, currentKernelVersion());
