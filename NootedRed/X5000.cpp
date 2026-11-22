@@ -313,10 +313,16 @@ bool X5000::allocateHWEngines(void* const self)
     [[clang::suppress]] singleton().sdma0EngineField(self) = singleton().sdmaEngineMC->alloc();
 
     if (VCN::ready()) {
-        auto* engine = VCN::allocateEngine();
-        // 复用本版本的引擎数组基址和原生类型枚举，不另设固定的 VCN 字段偏移。
-        (singleton().pm4EngineField + kAMDHWEngineTypeVCN0 * sizeof(void*))(self) = engine;
-        if (!engine) { singleton().hasVCN0Field(self) = false; }
+        // 槽位只在引擎真正分配成功后才写入；失败时保持空槽，能力也不暴露。
+        if (auto* const engine = VCN::allocateEngine(); engine != nullptr) {
+            // 复用本版本的引擎数组基址和原生类型枚举，不另设固定的 VCN 字段偏移。
+            (singleton().pm4EngineField + kAMDHWEngineTypeVCN0 * sizeof(void*))(self) = engine;
+            singleton().hasVCN0Field(self) = true;
+        }
+        else {
+            singleton().hasVCN0Field(self) = false;
+        }
+        NRed::singleton().setProp32("NRedVCNCapabilityFlag", singleton().hasVCN0Field(self) ? 1 : 0);
     }
 
     return true;
@@ -344,7 +350,10 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
     singleton().supportedDisplayCountField(self) = 4;
     singleton().hasUVD0Field(self)               = false;
     singleton().hasVCEField(self)                = false;
-    singleton().hasVCN0Field(self)               = VCN::ready();
+    // setupAndInitializeHWCapabilities 在 allocateHWEngines 之前运行（14/15 顺序一致）。
+    // 这里只反映「引擎是否已真正落地」，绝不提前暴露 VCN0：空槽位会让 VideoToolbox
+    // 以为媒体能力可用，登录期一提交就是 VCN0Dec 超时 + GPU reset（UI 卡死）。
+    singleton().hasVCN0Field(self)               = VCN::allocated();
     singleton().hasSDMAPagingQueueField(self)    = false;
     singleton().hasGetAllClockLimitsField(self)  = false;
     if (currentKernelVersion() >= MACOS_10_15) { singleton().dccDisplayableSupportField(self) = true; }
