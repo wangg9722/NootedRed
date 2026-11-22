@@ -303,6 +303,14 @@ namespace
             stage(Stage::OriginalError);
             return result;
         }
+        // 登录期每个新进程都会进这个钩子，可能多进程并发；体内有 vm 页表写操作，
+        // 加一个全局闸门，避免并发/重入互相踩（重入时直接放行原函数结果）。
+        static bool hookBusy{false};
+        if (__atomic_exchange_n(&hookBusy, true, __ATOMIC_ACQ_REL)) { return result; }
+        struct BusyReset
+        {
+            ~BusyReset() { __atomic_store_n(&hookBusy, false, __ATOMIC_RELEASE); }
+        } busyReset;
         // 按 FairPlay 权限统一选择策略；客户端只允许 AMD 驱动侧解码项，
         // 保留 AppleGVA 和编码代码原样。
         bool   fairPlayDecode{false};
@@ -317,7 +325,9 @@ namespace
             fairPlayDecode = true;
             if (pid > 0) { fairPlayPID = static_cast<UInt32>(pid); }
         }
-        if (!VCN::allocated() || !devicePatches) {
+        // 只有引擎真正 init 成功后才允许改写用户态解码路径；否则保持原样走软解，
+        // 避免「引擎未就绪但解码器已被放行」的不一致状态（登录期一提交就 VCN0Dec 超时）。
+        if (!VCN::engineStarted() || !devicePatches) {
             stage(Stage::NoMap, fairPlayPID);
             return result;
         }
