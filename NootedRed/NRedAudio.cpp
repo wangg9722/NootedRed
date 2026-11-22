@@ -203,7 +203,8 @@ bool NRedAudio::enabled() const { return this->active; }
 void NRedAudio::init()
 {
     this->probeOnly = checkKernelArgument("-NRedAudioProbe");
-    this->active    = this->probeOnly || checkKernelArgument("-NRedAudioApply");
+    // 默认开启（上游参考实现本来就无条件执行）；只有显式 -NRedNoAudio 才关闭。
+    this->active    = this->probeOnly || !checkKernelArgument("-NRedNoAudio");
     NRed::singleton().setProp32("NRedAudioMode", this->active ? (this->probeOnly ? 1U : 2U) : 0U);
     if (this->active) {
         SYSLOG("NRedAudio", "HDMI/DP audio %s mode", this->probeOnly ? "probe(read-only)" : "apply");
