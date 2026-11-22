@@ -10,5 +10,7 @@ namespace VCN
     bool  ready();
     bool  allocated();
     void* allocateEngine();
+    // 仅 debug 分支：记录硬解初始化链路上各节点的发生顺序与时刻（code<<8|detail，ms 另存）。
+    void  traceInit(UInt32 code, UInt32 detail);
 
 }    // namespace VCN

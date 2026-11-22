@@ -11,6 +11,7 @@
 #include <VCNKernelData.hpp>
 #include <VCNKernelProfiles.hpp>
 #include <libkern/OSKextLib.h>
+#include <kern/clock.h>
 #include <libkern/c++/OSMetaClass.h>
 
 namespace
@@ -42,6 +43,23 @@ namespace
     constexpr unsigned    lengths[] = {37, 35, 30, 28};
     UInt32                hardwareInitCount{0};
 
+    // debug 分支用的初始化时序记录：每个节点写两个属性，NRedVCNTnnC = code<<8|detail，
+    // NRedVCNTnnM = 该时刻的 uptime 毫秒数。只看顺序和间隔，不改变任何行为。
+    UInt32 traceIndex{0};
+    void   traceEvent(const UInt32 code, const UInt32 detail)
+    {
+        uint64_t absTime{0};
+        clock_get_uptime(&absTime);
+        const UInt32 ms    = static_cast<UInt32>(absTime / 1000000ULL);
+        const UInt32 index = __atomic_fetch_add(&traceIndex, 1U, __ATOMIC_RELAXED);
+        if (index >= 12) { return; }
+        char key[32];
+        snprintf(key, sizeof(key), "NRedVCNT%02uC", index + 1);
+        NRed::singleton().setProp32(key, (code << 8) | (detail & 0xFF));
+        snprintf(key, sizeof(key), "NRedVCNT%02uM", index + 1);
+        NRed::singleton().setProp32(key, ms);
+    }
+
     bool supported()
     {
         return requested && VCNCapabilities::rejection(NRed::singleton().getDeviceID(), currentKernelVersion()) == 0;
@@ -56,17 +74,20 @@ namespace
         {
             return original(self, provider);
         }
+        traceEvent(4, 0);
         bool expected = false;
         if (__atomic_compare_exchange_n(&loadAttempted, &expected, true, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             // 在驱动 start 内请求可选加载，避免插件库依赖和加载回调内的递归请求。
             const auto status   = OSKextLoadKextWithIdentifier("com.apple.kext.AMDRadeonX6000");
             const bool complete = status == kOSReturnSuccess && has5000 && has6000 && hooks;
             __atomic_store_n(&loadCompleted, complete, __ATOMIC_RELEASE);
+            traceEvent(5, static_cast<UInt32>(status) & 0xFF);
             NRed::singleton().setProp32("NRedVCNNativeLoadStatus", static_cast<UInt32>(status));
             NRed::singleton().setProp32("NRedVCNNativeLoadReady", complete);
             SYSLOG("VCN", "native load status=0x%X prepared=%u", status, complete);
         }
         const auto result = original(self, provider);
+        traceEvent(6, result ? 1 : 0);
         NRed::singleton().setProp32("NRedVCNAcceleratorStarted", result);
         if (!result && !engineAllocated) { __atomic_store_n(&loadCompleted, false, __ATOMIC_RELEASE); }
         return result;
@@ -150,6 +171,7 @@ namespace
     bool clientStart(void* self, void* provider)
     {
         auto address = VCN::allocated() ? clientStart5000 : clientStart6000;
+        traceEvent(12, VCN::allocated() ? 1 : 0);
         return reinterpret_cast<bool (*)(void*, void*)>(address)(self, provider);
     }
     void clientStop(void* self, void* provider)
@@ -173,7 +195,7 @@ namespace
     }
     void signalWork(void* hardware)
     {
-        if (VCN::allocated()) { notifyAccess(hardware); }
+        if (VCN::allocated()) { traceEvent(11, 0); notifyAccess(hardware); }
         else {
             reinterpret_cast<void (*)(void*)>(signalOriginal)(hardware);
         }
@@ -181,6 +203,7 @@ namespace
     bool initHardware(void* self, UInt32 channel)
     {
         const auto result = reinterpret_cast<bool (*)(void*, UInt32)>(initHardwareOriginal)(self, channel);
+        traceEvent(10, (static_cast<UInt32>(channel) << 1) | (result ? 1U : 0U));
         NRed::singleton().setProp32("NRedVCNLastHardwareInit", result);
         auto count = __atomic_fetch_add(&hardwareInitCount, 1U, __ATOMIC_RELAXED);
         if (count < 16) { SYSLOG("VCN", "initHardware channel=%u result=%u", channel, result); }
@@ -257,12 +280,15 @@ namespace
 
 }    // namespace
 
+void VCN::traceInit(const UInt32 code, const UInt32 detail) { traceEvent(code, detail); }
+
 void VCN::init()
 {
     // -NRedNoVCNEngine：仅关闭本地 VCN 引擎分配（保留用户态补丁），用于在旧系统上二分定位挂死来源。
     requested = checkKernelArgument("-NRedVideoFix") && !checkKernelArgument("-NRedNoVCNEngine");
     if (checkKernelArgument("-NRedVideoFix") && !requested) { NRed::singleton().setProp32("NRedVCNEngineDisabled", 1); }
     if (requested) { lilu.onKextLoadForce(&x6000); }
+    traceEvent(1, requested ? 1 : 0);
 }
 bool VCN::ready()
 {
@@ -279,6 +305,7 @@ void* VCN::allocateEngine()
     engineAllocated = engine != nullptr;
     if (!engineAllocated) { __atomic_store_n(&loadCompleted, false, __ATOMIC_RELEASE); }
     NRed::singleton().setProp32("NRedVCNEngineAllocated", engineAllocated);
+    traceEvent(8, engineAllocated ? 1 : 0);
     return engine;
 }
 
@@ -350,5 +377,6 @@ void VCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t slide
         NRed::singleton().setProp32("NRedVCNIdleGfxOffFix", ok);
     }
     NRed::singleton().setProp32(old ? "NRedVCNX5000Prepared" : "NRedVCNX6000Prepared", ok);
+    traceEvent(old ? 2 : 3, ok ? 1 : 0);
     SYSLOG("VCN", "%s prepared=%u ready=%u", old ? "X5000" : "X6000", ok, ready());
 }

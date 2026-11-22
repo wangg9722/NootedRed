@@ -309,6 +309,7 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
 
 bool X5000::allocateHWEngines(void* const self)
 {
+    VCN::traceInit(7, VCN::ready() ? 1 : 0);
     [[clang::suppress]] singleton().pm4EngineField(self)   = singleton().pm4EngineMC->alloc();
     [[clang::suppress]] singleton().sdma0EngineField(self) = singleton().sdmaEngineMC->alloc();
 
@@ -345,6 +346,7 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
     singleton().hasUVD0Field(self)               = false;
     singleton().hasVCEField(self)                = false;
     singleton().hasVCN0Field(self)               = VCN::ready();
+    VCN::traceInit(9, singleton().hasVCN0Field(self) ? 1 : 0);
     singleton().hasSDMAPagingQueueField(self)    = false;
     singleton().hasGetAllClockLimitsField(self)  = false;
     if (currentKernelVersion() >= MACOS_10_15) { singleton().dccDisplayableSupportField(self) = true; }
