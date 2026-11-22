@@ -141,3 +141,36 @@ UserVideoDecode、UserSurfaceSync、DebugEnabler、Backlight/ECBacklight、NRed�
 - HDMI 侧出声只验证过 DP，HDMI 未实测。
 - 后接显示器（开机后再插）与热插拔重配未验证。
 - `NRedAudio` 音量控件在 `AppleGFXHDA` 侧不可设属基线行为，与本清单无关。
+
+---
+
+## 7. 来源判定与重排序（复核：参考项目 + 1c8126a）
+
+判定规则：**在参考项目（`NootedRed-vithalchowdary`，硬解可用）里同样存在、且在我们 1c8126a
+（视频 stable）里也存在的，视为继承性问题，一律降级**；只有「参考项目没有 / 参考项目已正确处理」
+的才算我们自己的偏差，留在前面先查。
+
+| 条目 | 参考项目 | 1c8126a（视频 stable） | 判定 | 新优先级 |
+|---|---|---|---|---|
+| P0-1 `hasVCN0` 双赋值 | **参考已正确处理**：注释明确「无论 setup 在 allocate 之前还是之后」，且用 `engineEnabled()` 而非就绪闸门（`X5000.cpp:528-546, 579`） | 存在（`319` / `347` 行） | 我方偏差 | **保留（已修 `2646fb8`，已部署）** |
+| P0-2 X6000 可选加载竞态 | 同模式（`VCNBridge.cpp:397`，`loadReady() && engineAllocated`） | 存在 | 继承 | **降级** |
+| P0-3 MMIO 间接访问无锁 | **逐字相同**（`NRed.cpp:256-272`） | 存在 | 继承 | **降级** |
+| P1-1 `IOSleep(250)` | 存在（`X6000FB.cpp:631`） | 存在（`596`） | 继承 | **降级** |
+| P1-2 Widget 分支调错原函数 | **参考正确**（`AppleGFXHDA.cpp:163` 用 `orgCreateAppleHDAWidget`） | 存在（两处都错） | 我方独有 | **保留（低成本）** |
+| P1-3 音频状态无同步 | 参考 audio 无此重试/双 latch 状态机 | 音频尚未引入 | 我方新增 | **保留中** |
+| P1-4 音频在 `dp_receiver_power_ctrl` 额外触发 | **参考只在 `wrapReportCapabilitiesLinkInfo` 触发**，dp 回调里只 sleep 不碰 audio | 音频尚未引入 | 我方偏差 | **保留中** |
+| P2-4 `shared_region_check_np` 无闸门 | 同（`VP9UserPatch.cpp:326`） | — | 继承 | 降级 |
+| P2-5 `vm_protect` 容错偏乐观 | 同（参考该文件完全没有 vm_protect 处理） | — | 继承 | 降级 |
+| P2-6 `doGPUPanic` 10s + panic | 同（`DebugEnabler.cpp:266`） | — | 继承 | 降级 |
+| P2-1/2/3 版本表与 `PANIC_COND` | 同结构 | — | 继承 | 降级 |
+
+### 复核后的排查顺序
+
+1. **P0-1 `hasVCN0`**：已改并已部署（`2646fb8`，md5 `a1b61ebd`），等实测；
+2. **P1-4 音频触发点**：把 `dp_receiver_power_ctrl` 里的 audio 触发删掉，只保留
+   `wrapControllerPowerUp` + 链路能力上报这两个与参考一致的入口（这是目前唯一「我们多做了」的
+   时序差异）；
+3. **P1-2 Widget 分支**：一行改对，零风险；
+4. P1-3（音频状态同步）等 2 落地后复测「有时没声音」再决定；
+5. 已降级的继承项（MMIO 无锁、250ms、加载竞态、panic 路径）不作为主攻方向，
+   只有在 1~3 全部无效、且症状仍复现时才回头处理。
