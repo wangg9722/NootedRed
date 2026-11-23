@@ -5,6 +5,9 @@
 | 参数 | 功能 | 省略时 |
 | --- | --- | --- |
 | `-NRedDisplayFix` | 花屏／卡顿修复，包含 SubmitGuard 与 LegacyBlend 门修复 | 显示修复全部关闭 |
+| `-NRedSubmitGuard` | 只启用提交守卫（命令缓冲空闲尾填 PM4 filler），不触发表面补丁集 | 单独不启用 |
+| `-NRedSubmitGuardSig` | 提交守卫改用驱动映像解析定位（`AMDRadeonX5000MTLDriver` + 映像内偏移 `0x99240`），解析或核验失败回退候选表 | 只用候选表 |
+| `-NRedNoSubmitGuard` | 只关提交守卫，显示修复不受影响 | 守卫随 `-NRedDisplayFix` 启用 |
 | `-NRedScratch` | 在 26 上额外启用 SrdShared 与 ComputeScratch（26.0 形状机器码，语义未在 26.7.x 验证过） | 保持关闭 |
 | `-NRedVideoFix` | VCN 硬件视频加速，包含现有解码和编码路径 | VCN 桥接关闭 |
 | `NRedECFix=1` | 使用固件报告的 EC 背光来源 | EC 服务关闭 |
@@ -21,6 +24,7 @@
 不能仅凭该值证明控制权切换。`=0`、其他无效值或省略参数均不启动 EC 服务。
 
 显示开关在 macOS 14/15 启用 LegacyBlend 和 SubmitGuard；在 26 启用提交守卫与 LegacyBlend，
+提交守卫另有 `-NRedSubmitGuard`（只开守卫，不动显示修复）与 `-NRedNoSubmitGuard`（只关守卫）两个独立入口，
 SrdShared、ComputeScratch 需额外加 `-NRedScratch` 才启用（其数据是 26.0 形状，26.7.x 语义未验证），
 保留原生同步策略，不再启用 ImmediateSync。
 26 的 LegacyBlend 是两条协同写入：放行能力位门（`74 28` → `90 90`）并把 `sete cl` 改为
@@ -39,7 +43,7 @@ SrdShared、ComputeScratch 需额外加 `-NRedScratch` 才启用（其数据是 
 
 ```text
 -NRedImmediateSync -NRedSrdShared -NRedLegacyBlend -NRedComputeScratch
--NRedTransfer1x1 -NRedVCN -NRedNoSubmitGuard -NRedHDRIntegerFilter
+-NRedTransfer1x1 -NRedVCN -NRedHDRIntegerFilter
 NRedECBacklight=1 NRedECBacklight=2
 ```
 
