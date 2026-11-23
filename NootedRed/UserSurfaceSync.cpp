@@ -35,6 +35,8 @@ CopyOut writeUser{nullptr};
 UInt32 seenStages{0}, appliedCount{0}, errorCount{0}, windowServerCount{0}, weatherCount{0};
 UInt32 submitGuardCount{0};
 bool              srdShared{false}, legacyBlend{false}, computeScratch{false}, submitGuard{false};
+// 提交守卫的定位方式：true = 先按驱动映像基址 + 映像内相对偏移定位（-NRedSubmitGuardSig）。
+bool              submitGuardImage{false};
 bool              renderRequested{false};
 const UserLegacyCompat::Profile*           legacyProfile{nullptr};
 const UserSurfaceSyncData::DevicePatchSet* devicePatches{&UserSurfaceSyncData::DevicePatches[0]};
@@ -142,17 +144,43 @@ bool restorePages(vm_map_t map, Page* pages, const UInt32 count)
 // 随后执行原入口前 15 字节并跳回。
 kern_return_t installSubmitGuardMethod(vm_map_t map, const UInt64 method, bool& fresh);
 
+// 按映像定位提交方法：用路径在缓存里解析出 AMDRadeonX5000MTLDriver 的映像基址，
+// 再加映像内相对偏移。相对偏移在同一驱动二进制里稳定（26.4 / 26.7.3 均为 0x99240），
+// 因此不必为每个系统小版本记一条缓存级绝对地址；候选仍要过入口 15 字节核验，不符只跳过。
+bool resolveSubmitGuardImage(const UInt64 base, UInt64& method)
+{
+    using namespace UserSubmitGuardData;
+    UserSharedCache::Input input{};
+    input.reader = readUser;
+    UserSharedCache::Image image;
+    if (!UserSurfaceSyncResolver::imageForCache(input, base, image) || image.address == 0) { return false; }
+    const UInt64 candidate = image.address + ImageRelativeOffset;
+    if (candidate < image.address || candidate >= UserSharedCache::UserLimit - MethodPatchSize) { return false; }
+    method = candidate;
+    return true;
+}
+
 // 多版本候选：每个候选都必须通过入口 15 字节逐字节核验才安装，核验失败只跳过该候选。
 kern_return_t installSubmitGuard(vm_map_t map, const UInt64 base, bool& fresh)
 {
     using namespace UserSubmitGuardData;
     fresh = false;
-    constexpr UInt32 Maximum = OffsetCount > 1 ? OffsetCount : 1;
-    UInt64           offsets[Maximum] = {};
-    UInt32           count{0};
+    UInt64 offsets[OffsetCount + 1] = {};
+    UInt32 count{0};
+    const bool imageFirst = submitGuardImage;
+    if (submitGuardImage) {
+        UInt64 method{0};
+        if (resolveSubmitGuardImage(base, method)) {
+            offsets[count++] = method - base;
+            NRed::singleton().setProp32("NRedSubmitGuardImageResolved", 1);
+        } else {
+            NRed::singleton().setProp32("NRedSubmitGuardImageResolved", 0);
+            SYSLOG("UserSurfaceSync", "SubmitGuard image lookup failed, falling back to offset table");
+        }
+    }
     if (legacyProfile) {
         const auto offset = UserLegacyData::submitOffset(legacyProfile->major);
-        offsets[count++] = offset;
+        if (offset != 0) { offsets[count++] = offset; }
     } else {
         for (UInt32 i = 0; i < OffsetCount; ++i) { offsets[count++] = Offsets[i]; }
     }
@@ -167,6 +195,9 @@ kern_return_t installSubmitGuard(vm_map_t map, const UInt64 base, bool& fresh)
         const auto result = installSubmitGuardMethod(map, base + offset, fresh);
         if (result == KERN_SUCCESS) {
             NRed::singleton().setProp32("NRedSubmitGuardOffsetIndex", i);
+            const bool fromImage = imageFirst && i == 0;
+            NRed::singleton().setProp32("NRedSubmitGuardSource", fromImage ? 1 : 0);
+            if (fromImage) { NRed::singleton().setProp32("NRedSubmitGuardImageApplied", 1); }
             return result;
         }
         last = result;
@@ -567,6 +598,7 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
     const bool displayFix     = checkKernelArgument("-NRedDisplayFix");
     const bool submitGuardArg = checkKernelArgument("-NRedSubmitGuard");
     const bool noSubmitGuard  = checkKernelArgument("-NRedNoSubmitGuard");
+    submitGuardImage          = checkKernelArgument("-NRedSubmitGuardSig");
     // -NRedNoSubmitGuard 只关提交守卫，显示修复（门与设备设置改写）不随之关闭。
     // -NRedSubmitGuard 让提交守卫能脱离显示修复单独启用（新增开关，默认关，仅显式打开时生效）；
     // 两者都不带时行为与 v0.9.1 一致。
@@ -581,6 +613,7 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
     NRed::singleton().setProp32("NRedSubmitGuardVersion", 1);
     NRed::singleton().setProp32("NRedSubmitGuardRevision", 7);
     NRed::singleton().setProp32("NRedSubmitGuardStandalone", submitGuardArg && !displayFix ? 1 : 0);
+    NRed::singleton().setProp32("NRedSubmitGuardImageMode", submitGuardImage ? 1 : 0);
     NRed::singleton().setProp32("NRedImmediateSyncVersion", 1);
     NRed::singleton().setProp32("NRedImmediateSyncRevision", 4);
     NRed::singleton().setProp32("NRedSrdSharedVersion", 1);
@@ -642,6 +675,6 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
         SYSLOG("UserSurfaceSync", "ComputeScratch-v1 enabled: single-SE scratch sizing; native kernel preserved; "
                "exact cache/code required");
     }
-    SYSLOG("UserSurfaceSync", "Metal hooks enabled: Darwin %u, device 0x%X, render=%u submit=%u",
-           currentKernelVersion().major(), deviceID, renderRequested, submitGuard);
+    SYSLOG("UserSurfaceSync", "Metal hooks enabled: Darwin %u, device 0x%X, render=%u submit=%u image=%u",
+           currentKernelVersion().major(), deviceID, renderRequested, submitGuard, submitGuardImage);
 }
