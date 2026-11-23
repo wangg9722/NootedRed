@@ -13,14 +13,16 @@ git -C reference/NootedRed-<user> fetch --all --tags
 
 ## 仓库清单（快照 2026-11-23）
 
-| 仓库 | 关系 | 默认分支 | 最近推送 | 快照 HEAD / 版本 |
+| 仓库 | 关系 | 最近推送 | 快照 HEAD / 版本 | 本地克隆（全量） |
 | --- | --- | --- | --- | --- |
-| [vithalchowdary](https://github.com/vithalchowdary/NootedRed) | 主参考：VCN1/Raven2 全链路、动态签名后端 | master | 2026-11-22 | `52158395` = `v1.3.1` + 8 提交 |
-| [weachy](https://github.com/weachy/NootedRed) | 同一 1.3.x 线，更新最勤 | master | 2026-11-23 | `c89751f2`（bump `1.3.2`） |
-| [steve12311](https://github.com/steve12311/NootedRed) | 0.9.x 预发布线，视频解码能力扩面 | master | 2026-11-18 | `098c9d8f`（VP9 Profile 2 硬解，`v0.9.0-pre-release.19`） |
-| [Kingtous](https://github.com/Kingtous/NootedRed) | 0.9.x 线，用户态补丁策略 | master | 2026-10-25 | `27e75c84`（统一 FairPlay 客户端） |
-| [xiaot-evo](https://github.com/xiaot-evo/NootedRed) | 0.8.x/0.9.x 线，独立 UserPatch 组件 | master | 2026-11-18 | `6d229431`（`v0.9.3` + `NootedRedUserPatch 0.3.2`） |
-| （内部）`NootedRead` | 我方 VCN 骨架干净实现 | `nred/vcn-skeleton-clean` | — | `38f863f`；硬解未成，但启动路径从不挂死 |
+| [vithalchowdary](https://github.com/vithalchowdary/NootedRed) | 主参考：VCN1/Raven2 全链路、动态签名后端 | 2026-11-22 | `52158395` = `v1.3.1` + 8 提交 | `NootedRed-vithalchowdary`，738 提交（`origin/master` = `52158395`），28M |
+| [weachy](https://github.com/weachy/NootedRed) | 同一 1.3.x 线，更新最勤 | 2026-11-23 | `c89751f2`（bump `1.3.2`） | `NootedRed-weachy`，742 提交，27M |
+| [steve12311](https://github.com/steve12311/NootedRed) | 0.9.x 预发布线，视频解码能力扩面 | 2026-11-18 | `098c9d8f`（VP9 Profile 2 硬解，`v0.9.0-pre-release.*`） | `NootedRed-steve12311`，681 提交，15M |
+| [Kingtous](https://github.com/Kingtous/NootedRed) | 0.9.x 线，用户态补丁策略 | 2026-10-25 | `27e75c84`（统一 FairPlay 客户端） | `NootedRed-Kingtous`，600 提交，12M |
+| [xiaot-evo](https://github.com/xiaot-evo/NootedRed) | 0.8.x/0.9.x 线，独立 UserPatch 组件 | 2026-11-18 | `6d229431`（`v0.9.3` + `NootedRedUserPatch 0.3.2`） | `NootedRed-xiaot-evo`，639 提交，17M |
+| （内部）`NootedRead` | 我方 VCN 骨架干净实现 | — | `38f863f`（`nred/vcn-skeleton-clean`）；硬解未成，但启动路径从不挂死 | 外部目录 `/Users/hl-king/Workspaces/.../opensource/NootedRead` |
+
+克隆与更新记录：2026-11-23 建四个衍生仓库全量克隆（均走本地代理，`master` 分支，含全部历史与 tag）；主参考 `NootedRed-vithalchowdary` 原为浅克隆，同日补全历史。
 
 ## 跟踪表（按仓库）
 
