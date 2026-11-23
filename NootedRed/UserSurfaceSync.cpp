@@ -307,23 +307,6 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
     using namespace UserSurfaceSyncData;
     char name[32];
     processName(process, name, sizeof(name));
-    // scratch 补丁集是 26.0 时代的机器码形状，在 26.7.3 上语义已变（0xBD 的寄存器分配、
-    // 0x32/0xB3 的 RIP 取址都已不同），因此默认关闭，只在显式参数下启用。
-    const bool scratchHere = computeScratch;
-    const auto* patches = activePatches(scratchHere);
-    UInt32      patchCount =
-        legacyProfile ?
-                 legacyProfile->patchCount :
-                 static_cast<UInt32>(scratchHere ? PatchCount : (legacyBlend ? LegacyPatchCount : BaselinePatchCount));
-    UserSurfaceSyncData::Patch combined[PatchCount];
-    if (legacyProfile) {
-        if (patchCount > PatchCount) { return result; }
-        for (UInt32 i = 0; i < patchCount; ++i) {
-            const auto& patch = legacyProfile->patches[i];
-            combined[i]       = {patch.offset, patch.original, patch.patched, patch.size};
-        }
-        patches = combined;
-    }
     UInt64      base{0};
     UInt8       header[104];
     if (readUser(args->startAddress, &base, sizeof(base)) != 0 || base == 0
@@ -379,7 +362,25 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
             }
         }
     }
+    // 单独启用提交守卫时立即返回：显示补丁集未解析，devicePatches 可能为空。
     if (!renderRequested) { return result; }
+    // scratch 补丁集是 26.0 时代的机器码形状，在 26.7.3 上语义已变（0xBD 的寄存器分配、
+    // 0x32/0xB3 的 RIP 取址都已不同），因此默认关闭，只在显式参数下启用。
+    const bool scratchHere = computeScratch;
+    const auto* patches = activePatches(scratchHere);
+    UInt32      patchCount =
+        legacyProfile ?
+                 legacyProfile->patchCount :
+                 static_cast<UInt32>(scratchHere ? PatchCount : (legacyBlend ? LegacyPatchCount : BaselinePatchCount));
+    UserSurfaceSyncData::Patch combined[PatchCount];
+    if (legacyProfile) {
+        if (patchCount > PatchCount) { return result; }
+        for (UInt32 i = 0; i < patchCount; ++i) {
+            const auto& patch = legacyProfile->patches[i];
+            combined[i]       = {patch.offset, patch.original, patch.patched, patch.size};
+        }
+        patches = combined;
+    }
     if (legacyProfile && !UserLegacyCompat::matches(readUser, base, header + 88, *legacyProfile)) {
         stage(Stage::CacheMismatch);
         NRed::singleton().setProp32("NRedLegacyBlendRejected", 1);
@@ -563,39 +564,47 @@ void UserSurfaceSync::init(KernelPatcher& patcher)
 {
     legacyProfile   = UserLegacyData::metal(currentKernelVersion().major());
     renderRequested = false;
-    // -NRedNoSubmitGuard 只关提交守卫，保留显示修复（门与设备设置改写）。
-    submitGuard     = checkKernelArgument("-NRedDisplayFix") && !checkKernelArgument("-NRedNoSubmitGuard");
-    legacyBlend = renderRequested = submitGuard;
+    const bool displayFix     = checkKernelArgument("-NRedDisplayFix");
+    const bool submitGuardArg = checkKernelArgument("-NRedSubmitGuard");
+    const bool noSubmitGuard  = checkKernelArgument("-NRedNoSubmitGuard");
+    // -NRedNoSubmitGuard 只关提交守卫，显示修复（门与设备设置改写）不随之关闭。
+    // -NRedSubmitGuard 让提交守卫能脱离显示修复单独启用（新增开关，默认关，仅显式打开时生效）；
+    // 两者都不带时行为与 v0.9.1 一致。
+    submitGuard     = (displayFix || submitGuardArg) && !noSubmitGuard;
+    legacyBlend = renderRequested = displayFix && !noSubmitGuard;
     // scratch/srdShared 用的是 26.0 时代的机器码形状，在 26.7.x 上语义已变，因此默认关闭，
-    // 只有显式 -NRedScratch 才启用；-NRedDisplayFix 只负责门（LegacyBlend）与 SubmitGuard。
+    // 只有显式 -NRedScratch 才启用；-NRedDisplayFix 只负责门（LegacyBlend），提交守卫另有开关。
     const bool scratchRequested = checkKernelArgument("-NRedScratch");
     computeScratch = srdShared = submitGuard && currentKernelVersion().majorMatches(MACOS_26)
                                 && scratchRequested;
     NRed::singleton().setProp32("NRedDisplayFixVersion", 2);
     NRed::singleton().setProp32("NRedSubmitGuardVersion", 1);
-    NRed::singleton().setProp32("NRedSubmitGuardRevision", 6);
+    NRed::singleton().setProp32("NRedSubmitGuardRevision", 7);
+    NRed::singleton().setProp32("NRedSubmitGuardStandalone", submitGuardArg && !displayFix ? 1 : 0);
     NRed::singleton().setProp32("NRedImmediateSyncVersion", 1);
     NRed::singleton().setProp32("NRedImmediateSyncRevision", 4);
     NRed::singleton().setProp32("NRedSrdSharedVersion", 1);
     NRed::singleton().setProp32("NRedLegacyBlendVersion", 1);
     NRed::singleton().setProp32("NRedComputeScratchVersion", 1);
-    if (!renderRequested) {
+    if (!renderRequested && !submitGuard) {
         NRed::singleton().setProp32("NRedSubmitGuardDisabled", 1);
         return;
     }
-    NRed::singleton().setProp32("NRedImmediateSyncRequested", 1);
     const auto deviceID = NRed::singleton().getDeviceID();
-    devicePatches       = UserSurfaceSyncData::findDevice(deviceID);
-    if (devicePatches == nullptr) {
-        NRed::singleton().setProp32("NRedImmediateSyncRejected", 3);
-        SYSLOG("UserSurfaceSync", "Unsupported render-fix device: 0x%X", deviceID);
-        return;
-    }
-    if (!currentKernelVersion().majorMatches(MACOS_26) && !legacyProfile) {
-        NRed::singleton().setProp32("NRedImmediateSyncRejected", 4);
-        SYSLOG("UserSurfaceSync", "Metal fix requires Darwin 23/24/25; found %u.%u", currentKernelVersion().major(),
-               currentKernelVersion().minor());
-        return;
+    if (renderRequested) {
+        NRed::singleton().setProp32("NRedImmediateSyncRequested", 1);
+        devicePatches = UserSurfaceSyncData::findDevice(deviceID);
+        if (devicePatches == nullptr) {
+            NRed::singleton().setProp32("NRedImmediateSyncRejected", 3);
+            SYSLOG("UserSurfaceSync", "Unsupported render-fix device: 0x%X", deviceID);
+            return;
+        }
+        if (!currentKernelVersion().majorMatches(MACOS_26) && !legacyProfile) {
+            NRed::singleton().setProp32("NRedImmediateSyncRejected", 4);
+            SYSLOG("UserSurfaceSync", "Metal fix requires Darwin 23/24/25; found %u.%u", currentKernelVersion().major(),
+                   currentKernelVersion().minor());
+            return;
+        }
     }
     getTaskMap = reinterpret_cast<GetTaskMap>(patcher.solveSymbol(KernelPatcher::KernelID, "_get_task_map"));
     patcher.clearError();
