@@ -260,6 +260,22 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
     PANIC_COND(!PenguinWizardry::PatternRouteRequest::routeAll(patcher, id, requests, slide, size), "X6000FB",
                "Failed to route symbols");
 
+    // 音频触发点模式由 -NRedAudioLinkInfo 选择：
+    //   开 = 参考实现语义（只在链路能力上报处触发，dp 回调不碰音频）；
+    //   关 = 已验证稳定行为（沿用 dp 回调触发）。
+    if (checkKernelArgument("-NRedAudioLinkInfo")) {
+        KernelPatcher::RouteRequest linkInfoRequest{
+            "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer27reportCapabilities_LinkInfoEv", wrapReportCapabilitiesLinkInfo,
+            this->orgReportCapabilitiesLinkInfo};
+        if (!patcher.routeMultiple(id, &linkInfoRequest, 1, slide, size)) {
+            patcher.clearError();
+            SYSLOG("X6000FB", "Optional route reportCapabilities_LinkInfo unavailable; continuing");
+        }
+        else {
+            NRed::singleton().setProp32("NRedAudioLinkInfoMode", 1);
+        }
+    }
+
     PenguinWizardry::JumpPatternRouteRequest atombiosRequests[] = {
         {"__ZN15AmdAtomVramInfo14createVramInfoEP15AmdAtomFwHelperj", wrapCreateVramInfo, this->orgCreateVramInfo,
          kCreateVramInfoCallPattern, kCreateVramInfoCallPatternMask, kCreateVramInfoCallPatternJumpInstOff},
@@ -593,12 +609,26 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     return ret;
 }
 
+IOReturn X6000FB::wrapReportCapabilitiesLinkInfo(void* const self)
+{
+    const auto ret = FunctionCast(wrapReportCapabilitiesLinkInfo, singleton().orgReportCapabilitiesLinkInfo)(self);
+    // 只有 -NRedAudioLinkInfo 打开时才会注册这条路由，此处必然属于新模式。
+    NRedAudio::singleton().onLinkCapabilitiesReported();
+    return ret;
+}
+
 void X6000FB::wrapDpReceiverPowerCtrl(void* const link, const bool powerOn)
 {
     FunctionCast(wrapDpReceiverPowerCtrl, singleton().orgDpReceiverPowerCtrl)(link, powerOn);
-    IOSleep(250);
-    // DP 链路重新上电/训练后，音频侧需要重新 latch（只在开启音频修复时触发）。
-    if (powerOn) { NRedAudio::singleton().onLinkCapabilitiesReported(); }
+    if (checkKernelArgument("-NRedAudioLinkInfo")) {
+        // 参考实现语义：只在上电后延时，完全不碰音频。
+        if (powerOn) { IOSleep(250); }
+    }
+    else {
+        // 已验证稳定行为（与 v0.9.1 逐字一致）：无条件延时 + 上电后触发一次音频 latch。
+        IOSleep(250);
+        if (powerOn) { NRedAudio::singleton().onLinkCapabilitiesReported(); }
+    }
 }
 
 void* X6000FB::wrapCreateObjectInfo(void* const helper, const UInt32 tableOffset)
