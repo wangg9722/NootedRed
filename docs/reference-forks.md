@@ -28,11 +28,11 @@ git -C reference/NootedRed-<user> fetch --all --tags
 
 | 仓库 | 已分析范围 | 采纳 | 否决 / 不采纳 | 待分析 |
 | --- | --- | --- | --- | --- |
-| vithalchowdary | `v1.3.1` 全量：显存分配器、音频触发、`allocPages` 下溢、GFXOFF、能力位时序；11-22 新增 8 提交 | VRAM 分配器两项（开关化）、音频触发点对齐（开关化）、`hasVCN0` 单源/延后（开关化）、`engineEnabled()` 写法 | GFXOFF 压制；私有共享缓存补丁器整段（后被上游移除）；全局页缓存按进程/时机跳过 | 编码链路（HEVC Main10、slice delta）尚未细看 |
-| weachy | 仅元数据 | — | — | `1.3.1 → 1.3.2` 的 diff 未看 |
-| steve12311 | 仅元数据 | — | — | VP9 Profile 2 硬解实现未看 |
-| Kingtous | 仅元数据 | — | — | FairPlay 客户端统一 + 保留原生 sync 未看 |
-| xiaot-evo | 仅元数据 | — | — | UserPatch 拆分与版本号策略未看 |
+| vithalchowdary | 全量 133 条非官方提交已扫描（含 11-22 的 8 提交） | VRAM 分配器两项（开关化）、音频触发点对齐（开关化）、`hasVCN0` 单源/延后（开关化）、`engineEnabled()` 写法 | GFXOFF 压制；私有共享缓存补丁器整段（后被上游移除）；全局页缓存按进程/时机跳过 | 编码链路（HEVC Main10、slice delta）尚未细看 |
+| weachy | 全量非官方提交已扫描（含 1.3.x 全部） | 见 `reference-scan-2026-11-24.md` 第 1–30 项 | 同左 | 逐项落地时再看细节 |
+| steve12311 | 全量非官方提交已扫描（0.9.x + 补丁基础设施） | 见扫描文档第 2、7、14、18 等项 | 同左 | 逐项落地时再看细节 |
+| Kingtous | 已扫描（15 条非官方提交，多为 0.9.x 线共享） | FairPlay entitlement 判据（扫描第 10 项） | 同左 | — |
+| xiaot-evo | 已扫描（49 条，多为 satellite 外置补丁线） | 只取「VFS 延后 + 安全内核线程」原则（第 3、29 项） | satellite 架构整体不采纳 | — |
 | NootedRead（内部） | `HANDOFF.md`、`X5000.cpp`、`e9a4f56` | 「引擎 init 成功后才 publish `hasVCN0`」；私有槽位塞 VCN 的做法（作为对照） | — | 其余未看 |
 
 ## 决策明细
@@ -65,7 +65,8 @@ git -C reference/NootedRed-<user> fetch --all --tags
 | 日期 | 仓库 | 变更 | 处置 |
 | --- | --- | --- | --- |
 | 2026-11-23 | vithalchowdary | `v1.3.1` 之后新增 8 提交（VCN1 动态签名重构、dyld 缓存 hash mismatch 修、音频 DTO 检查、HEVC Main10 编码、工具链自检） | 已归纳为 4 条待做/1 条不采纳，见上表 |
-| 2026-11-23 | weachy / steve12311 / Kingtous / xiaot-evo | 首次建跟踪，建立全量克隆 | 待逐个分析 |
+| 2026-11-23 | weachy / steve12311 / Kingtous / xiaot-evo | 首次建跟踪，建立全量克隆 | 已于 11-24 完成扫描 |
+| 2026-11-24 | 全部 5 家 | 以官方 `ChefKissInc/master` 为基准扫描非官方提交，去重并集 286 条，归为 30 个功能点 | 评估结论见 `reference-scan-2026-11-24.md`（推荐吸收 14 / 需要确认 9 / 不考虑 7） |
 
 ## 查阅原则
 
