@@ -8,6 +8,9 @@
 | `-NRedSubmitGuard` | 只启用提交守卫（命令缓冲空闲尾填 PM4 filler），不触发表面补丁集 | 单独不启用 |
 | `-NRedSubmitGuardSig` | 提交守卫改用驱动映像解析定位（`AMDRadeonX5000MTLDriver` + 映像内偏移 `0x99240`），解析或核验失败回退候选表 | 只用候选表 |
 | `-NRedNoSubmitGuard` | 只关提交守卫，显示修复不受影响 | 守卫随 `-NRedDisplayFix` 启用 |
+| `-NRedVRAMAlloc` | APU 显存分配五级碎片回退（`AMDHWMemory::allocateLargeBlocks`） | 关 |
+| `-NRedAllocPagesUnderflow` | `allocPages` 32 位空洞下溢修，与上面的回退互不依赖 | 关 |
+| `-NRedVCNAfterInit` | VCN0 能力位只在引擎真正 init 成功后暴露，引擎槽位先判空再写 | 关（沿用 `VCN::ready()` 语义） |
 | `-NRedScratch` | 在 26 上额外启用 SrdShared 与 ComputeScratch（26.0 形状机器码，语义未在 26.7.x 验证过） | 保持关闭 |
 | `-NRedVideoFix` | VCN 硬件视频加速，包含现有解码和编码路径 | VCN 桥接关闭 |
 | `NRedECFix=1` | 使用固件报告的 EC 背光来源 | EC 服务关闭 |

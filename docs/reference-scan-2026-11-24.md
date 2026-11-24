@@ -6,7 +6,7 @@
 - **非官方提交**：各衍生仓库 master 上、不在 `official/master` 里的提交。按**功能点**归组（一个功能点可能跨多条提交，含后续修正/回退）。
 - **去重并集 286 条**：vithalchowdary 133、weachy 144、steve12311 93、Kingtous 15、xiaot-evo 49（fork 嵌套，重叠已去重）。全量清单见文末附录。
 - **评估四档**：推荐吸收 / 需要确认 / 不考虑 / 已在用（复核既有实现，维持现状），每条给原因与前提。
-- **评估依据**：本机 Renoir（`0x15E7`）、macOS 14.8.9（Sonoma）、我方稳定线 `v0.9.1`（`7503ebf`）+ 三项开关分支 `feat/optional-switches`；以及历史已定案结论（GFXOFF 否决、26.x dual-quad NOP 致 FenceNotRetired、SubmitGuard 路径卡死、固定延时猜测代码不进主线）。
+- **评估依据**：本机 Renoir（`0x15E7`）、macOS 14.8.9（Sonoma）、我方稳定线 `v0.9.1`（`7503ebf`）+ 三项开关分支 `dev`；以及历史已定案结论（GFXOFF 否决、26.x dual-quad NOP 致 FenceNotRetired、SubmitGuard 路径卡死、固定延时猜测代码不进主线）。
 
 ## 结论摘要
 
@@ -44,7 +44,7 @@
 | 22 | 命令缓冲尾部填充 | `eb00c612` | 已在用（复核维持） | 这正是我方 SubmitGuard-v1 的职责：守卫内把「已用尾..容量尾」空闲区整段填 PM4 filler（`0x80000000`），随后执行原入口 15 字节并跳回。参考该提交只作边界条件对照，不重复实现。 |
 | 23 | 迁移到 `cs_validate_page`、删除 shared_region 钩子 | `0884bc7e` | 暂不迁移（记复评） | 这是架构级替换，且与我方 `v0.9.1` 稳定点（私有映射 + 引擎门 + 并发闸门）方向相反。迁移前必须先解决「每物理页只验证一次、跳过即全局永久未打补丁」的约束。 |
 | 24 | 哈希失配私有缓存补丁器 | `b6937493` | 不考虑 | 上游自己在后续提交里移除了它，回到页缓存 + 签名路线，不照搬。 |
-| 25 | SubmitGuard 多 OS 演进 | `7387e010`、`65816cd0`、`ea046131` | 已在用（不跟其演进） | 我方 SubmitGuard-v1 已在用：`-NRedDisplayFix` 打开且无 `-NRedNoSubmitGuard` 时安装；14/15 走 legacy 偏移（Darwin23 `0x30355E210`、Darwin24 `0x3087C3580`），26.x 走生成表（26.7.3 `0x310CE9240`、26.4 `0x310BF1240`）。参考三条是同一机制的多 OS 版本与 ABI/entitlement 演进，且上游 `0884bc7e` 后来把 `UserSubmitGuard.hpp` 整段删除，故不跟随。另注：我方 26.x 偏移原是绝对地址硬编码（与「预生成机器码」同类脆弱点），已按本表建议改为映像解析，见分支 `feat/optional-switches` 的 `submit-guard` 提交（开关 `-NRedSubmitGuardSig`，默认关）。 |
+| 25 | SubmitGuard 多 OS 演进 | `7387e010`、`65816cd0`、`ea046131` | 已在用（不跟其演进） | 我方 SubmitGuard-v1 已在用：`-NRedDisplayFix` 打开且无 `-NRedNoSubmitGuard` 时安装；14/15 走 legacy 偏移（Darwin23 `0x30355E210`、Darwin24 `0x3087C3580`），26.x 走生成表（26.7.3 `0x310CE9240`、26.4 `0x310BF1240`）。参考三条是同一机制的多 OS 版本与 ABI/entitlement 演进，且上游 `0884bc7e` 后来把 `UserSubmitGuard.hpp` 整段删除，故不跟随。另注：我方 26.x 偏移原是绝对地址硬编码（与「预生成机器码」同类脆弱点），已按本表建议改为映像解析，见开发线 `dev` 的 `submit-guard` 提交（开关 `-NRedSubmitGuardSig`，默认关）。 |
 | 26 | Metal dual-quad / HwInfo 条件式系列 | `da411a3b`、`86c2f339`、`61e56018`、`1231d174`、`ab02dd36` | 不考虑 | 已定案：26.x NOP 该能力分支会导致 FenceNotRetired + FullAsicReset；条件式方案仍依赖 build 常量。 |
 | 27 | GFXOFF 压制 | `c9467c96` 内 | 不考虑 | 用户明确否决激进手段。 |
 | 28 | Cezanne 专属（VCN/加速渲染） | `02d3789c`、`be1545aa` | 不考虑 | APU 不匹配本机。 |

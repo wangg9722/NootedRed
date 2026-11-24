@@ -8,7 +8,7 @@
 | 分支 | 角色 | 说明 |
 | --- | --- | --- |
 | `master` | 主线 | 已打 tag 的稳定基线（`v0.9.1-20261123-login-guard` = `7503ebf`） |
-| `feat/optional-switches` | 开发线 | 所有新功能点都在这里按「一功能点一提交 + 独立开关」叠加 |
+| `dev` | 开发线 | 所有新功能点都在这里按「一功能点一提交 + 独立开关」叠加 |
 
 ## 收纳的分支（`attic/*`）
 
@@ -33,7 +33,9 @@
 | `attic/fix_hevc-overspec-guard` | `fix/hevc-overspec-guard` | 超规格 HEVC 守卫回退（远端仍存在） |
 | `attic/revert_submitguard-e06bf70` | `revert/submitguard-e06bf70` | 一次 revert 记录（远端仍存在） |
 
-远端同名分支保持原样，避免他人引用失效；本地只是改名，没有删除任何提交。
+远端同步：`attic/*` 已全部推到 origin；origin 上旧命名的非主分支（`analysis/*`、`fix/*`、
+`feat/audio-*`、`revert/*`）已删除，内容都保留在对应 `attic/*` 分支里（每个 attic 分支的 tip
+都包含原远端 tip）。origin 目前只有 `master` 与 `attic/*`，`dev` 待实机验证通过后再推。
 
 ## 开关纪律（与分支同一套）
 
