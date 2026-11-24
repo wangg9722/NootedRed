@@ -262,38 +262,46 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
 
     // 显存分配器：APU 上 BAR0 可见域和不可见域背后是同一块系统内存，allocateLargeBlocks 失败大多是碎片，
     // 而不是总量不足，因此按参考实现分五级回退，把碎片空间利用起来。
-    this->orgTotalFreeMemory = reinterpret_cast<decltype(this->orgTotalFreeMemory)>(
-        patcher.solveSymbol(id, "__ZN26AMDRadeonX5000_AMDHWMemory15totalFreeMemoryEv", slide, size));
-    this->orgAllocate = reinterpret_cast<decltype(this->orgAllocate)>(patcher.solveSymbol(
-        id,
-        "__ZN26AMDRadeonX5000_AMDHWMemory8allocateEP16AMDMemoryElementyy28_eAMD_MEMORY_ALLOCATION_TYPEb15_eOP_"
-        "ORIGINATOR9_eOP_TYPE",
-        slide, size));
-    this->orgAllocateNonContiguous = reinterpret_cast<decltype(this->orgAllocateNonContiguous)>(patcher.solveSymbol(
-        id,
-        "__ZN26AMDRadeonX5000_AMDHWMemory21allocateNonContiguousEP16AMDMemoryElementyy28_eAMD_MEMORY_ALLOCATION_"
-        "TYPEbby15_eOP_ORIGINATOR9_eOP_TYPE",
-        slide, size));
+    // 开关 -NRedVRAMAlloc（默认关，保持已验证的稳定行为）。
+    if (checkKernelArgument("-NRedVRAMAlloc")) {
+        this->orgTotalFreeMemory = reinterpret_cast<decltype(this->orgTotalFreeMemory)>(
+            patcher.solveSymbol(id, "__ZN26AMDRadeonX5000_AMDHWMemory15totalFreeMemoryEv", slide, size));
+        this->orgAllocate = reinterpret_cast<decltype(this->orgAllocate)>(patcher.solveSymbol(
+            id,
+            "__ZN26AMDRadeonX5000_AMDHWMemory8allocateEP16AMDMemoryElementyy28_eAMD_MEMORY_ALLOCATION_TYPEb15_eOP_"
+            "ORIGINATOR9_eOP_TYPE",
+            slide, size));
+        this->orgAllocateNonContiguous =
+            reinterpret_cast<decltype(this->orgAllocateNonContiguous)>(
+                patcher.solveSymbol(id,
+                                    "__ZN26AMDRadeonX5000_AMDHWMemory21allocateNonContiguousEP16AMDMemoryElementyy28_"
+                                    "eAMD_MEMORY_ALLOCATION_TYPEbby15_eOP_ORIGINATOR9_eOP_TYPE",
+                                    slide, size));
 
-    if (this->orgTotalFreeMemory != nullptr && this->orgAllocate != nullptr
-        && this->orgAllocateNonContiguous != nullptr) {
-        PenguinWizardry::PatternRouteRequest allocLargeReq{
-            "__ZN26AMDRadeonX5000_AMDHWMemory19allocateLargeBlocksEP16AMDMemoryElementyyy15_eOP_ORIGINATOR9_eOP_TYPEb",
-            wrapAllocateLargeBlocks, this->orgAllocateLargeBlocks};
-        if (allocLargeReq.route(patcher, id, slide, size)) {
-            NRed::singleton().setProp32("NRedVRAMAllocatorRevision", 1);
+        if (this->orgTotalFreeMemory != nullptr && this->orgAllocate != nullptr
+            && this->orgAllocateNonContiguous != nullptr) {
+            PenguinWizardry::PatternRouteRequest allocLargeReq{
+                "__ZN26AMDRadeonX5000_AMDHWMemory19allocateLargeBlocksEP16AMDMemoryElementyyy15_eOP_ORIGINATOR9_eOP_TYPEb",
+                wrapAllocateLargeBlocks, this->orgAllocateLargeBlocks};
+            if (allocLargeReq.route(patcher, id, slide, size)) {
+                NRed::singleton().setProp32("NRedVRAMAllocEnabled", 1);
+            }
+            else {
+                patcher.clearError();
+                SYSLOG("X5000", "Failed to route AMDHWMemory::allocateLargeBlocks; allocator fallback skipped");
+            }
         }
         else {
             patcher.clearError();
-            SYSLOG("X5000", "Failed to route AMDHWMemory::allocateLargeBlocks; allocator fallback skipped");
+            SYSLOG("X5000", "Failed to resolve AMDHWMemory allocator symbols; allocator fallback skipped");
         }
     }
-    else {
-        patcher.clearError();
-        SYSLOG("X5000", "Failed to resolve AMDHWMemory allocator symbols; allocator fallback skipped");
-    }
 
-    patchAllocPagesUnderflow(patcher, id, slide, size);
+    // 开关 -NRedAllocPagesUnderflow（默认关）：allocPages 32 位空洞下溢修，与上面的碎片回退互不依赖。
+    if (checkKernelArgument("-NRedAllocPagesUnderflow")) {
+        patchAllocPagesUnderflow(patcher, id, slide, size);
+        NRed::singleton().setProp32("NRedAllocPagesUnderflowEnabled", 1);
+    }
 
     if (currentKernelVersion() >= MACOS_11) {
         PenguinWizardry::PatternSolveRequest solveRequest{"__ZN30AMDRadeonX5000_AMDGFX9Hardware15notifyGfxAccessEv",
