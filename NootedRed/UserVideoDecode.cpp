@@ -52,6 +52,9 @@ namespace
     // 登录期每个新进程都会进钩子，alloc 成功但 init 未完成时改写用户态会造成
     // 「解码器已用硬件、引擎未就绪」的不一致，首发请求即 VCN0Dec 超时。
     bool                              engineGate{false};
+    // -NRedHookBusyGate（默认关）：登录期多进程会同时进钩子，而钩子体内有 vm 页表写，
+    // 打开后加全局并发闸门，重入/并发时直接返回原函数结果。
+    bool                              hookBusyGate{false};
     UInt32                            decodeGuardApplied{0}, decodeGuardRejected{0};
     const UserVideoDecodeData::Patch* devicePatches{nullptr};
     // 14（Darwin 23）走 steve12311 的 Darwin23/设备补丁集：按 image + 整函数指纹定位，
@@ -361,6 +364,21 @@ namespace
             stage(Stage::OriginalError);
             return result;
         }
+        // 并发闸门（-NRedHookBusyGate）：登录期多进程同时进钩子，体内有 vm 页表写，
+        // 并发/重入时直接放行原函数结果，避免互相踩。
+        static bool hookBusy{false};
+        if (hookBusyGate && __atomic_exchange_n(&hookBusy, true, __ATOMIC_ACQ_REL)) {
+            NRed::singleton().setProp32("NRedHookBusySkipped", 1);
+            return result;
+        }
+        struct BusyReset
+        {
+            bool active;
+            ~BusyReset()
+            {
+                if (active) { __atomic_store_n(&hookBusy, false, __ATOMIC_RELEASE); }
+            }
+        } busyReset{hookBusyGate};
         // 按 FairPlay 权限统一选择策略；客户端只允许 AMD 驱动侧解码项，
         // 保留 AppleGVA 和编码代码原样。
         bool   fairPlayDecode{false};
@@ -637,6 +655,8 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     // 引擎就绪门（默认关，保持已验证行为）。
     engineGate = checkKernelArgument("-NRedVCNEngineGate");
     if (engineGate) { NRed::singleton().setProp32("NRedVCNEngineGate", 1); }
+    hookBusyGate = checkKernelArgument("-NRedHookBusyGate");
+    if (hookBusyGate) { NRed::singleton().setProp32("NRedHookBusyGate", 1); }
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
     const auto  rejected   = VCNCapabilities::rejection(deviceID, currentKernelVersion());
