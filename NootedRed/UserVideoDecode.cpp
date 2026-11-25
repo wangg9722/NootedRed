@@ -10,6 +10,8 @@
 #include <UserDecoderGuardData.hpp>
 #include <UserVideoDecodeData.hpp>
 #include <UserVideoDecodeResolver.hpp>
+#include <UserSonomaVideoData.hpp>
+#include <UserSonomaVideoDecodeResolver.hpp>
 #include <VCN.hpp>
 #include <VCNCapabilities.hpp>
 #include <kern/task.h>
@@ -41,8 +43,15 @@ namespace
     bool                              fairPlayDriverOnly{false};
     bool                              decodeGuard{true};
     bool                              legacyNoVCNUser{false}, legacyNoFairPlay{false};
+    // 旧系统（14/15）默认不装 VCN 用户态解码补丁：开机期 VTDecoderXPCService 就会往
+    // VCN0Dec 灌提交，而守卫在 14 上的规格判据尚未按本机布局校准，拦不住 → 通道挂死。
+    // -NRedLegacyVCNUser 显式打开后才走原来的解码路径（仅用于实验）。
+    bool                              legacyVCNUser{false};
     UInt32                            decodeGuardApplied{0}, decodeGuardRejected{0};
     const UserVideoDecodeData::Patch* devicePatches{nullptr};
+    // 14（Darwin 23）走 steve12311 的 Darwin23/设备补丁集：按 image + 整函数指纹定位，
+    // 与 26 的动态解析、以及从 weachy 导入的 OS23 静态表互为独立来源。
+    const UserSonomaVideoData::Patch* sonomaPatches{nullptr};
     const UserLegacyCompat::Profile*  legacyProfile{nullptr};
     constexpr auto                    PatchCount   = arrsize(UserVideoDecodeData::Patches);
     constexpr UInt32                  MaxPageCount = PatchCount * 2;
@@ -361,6 +370,14 @@ namespace
             stage(Stage::NoMap, fairPlayPID);
             return result;
         }
+        // 旧系统默认整体退出：这一版的规格守卫在 14 上的字段判据未经校准，
+        // 开机期解码提交会直接把 VCN0Dec 打通挂死（GPU 重启报告里
+        // FirstPendingCB = VTDecoderXPCServ / SubmitContext = Video）。
+        if (legacyProfile && !legacyVCNUser) {
+            NRed::singleton().setProp32("NRedLegacyVCNUserDisabled", 1);
+            stage(Stage::NoMap, fairPlayPID);
+            return result;
+        }
         if (args == nullptr || args->startAddress == 0) {
             stage(Stage::Argument, fairPlayPID);
             return result;
@@ -369,7 +386,11 @@ namespace
         const auto* patches    = devicePatches;
         UInt32      patchCount = legacyProfile ? legacyProfile->patchCount : static_cast<UInt32>(PatchCount);
         UserVideoDecodeData::Patch legacyPatches[PatchCount];
-        if (legacyProfile) {
+        if (sonomaPatches) {
+            // Darwin 23：直接用 steve12311 的 23 站点数据集，条数由其数据本身决定。
+            patches    = sonomaPatches;
+            patchCount = UserSonomaVideoDecodeResolver::SiteCount;
+        } else if (legacyProfile) {
             if (patchCount > PatchCount) { return result; }
             for (UInt32 i = 0; i < patchCount; ++i) {
                 const auto& patch = legacyProfile->patches[i];
@@ -393,7 +414,9 @@ namespace
         // 解码规格守卫独立于渲染修复、FairPlay 权限与旧系统兼容开关：
         // 只要缓存与镜像对得上就在本进程装一次，唯一控制量是 decodeGuard
         // （-NRedNoDecodeGuard 关闭，14/15/26 一视同仁）。
-        if (decodeGuard) {
+        // Darwin 23 走整函数数据集时不再装运行期守卫：该数据集自身就包含 codec/规格选择
+        // 逻辑，且守卫入口与数据集站点可能落在同一函数，双重改写会互相破坏。
+        if (decodeGuard && !sonomaPatches) {
             if (auto map = getTaskMap(current_task())) {
                 bool       fresh{false};
                 const auto installed = installDecodeGuard(map, base, fresh);
@@ -412,7 +435,7 @@ namespace
                     }
                     // 旧系统上守卫缺席就等于超规格提交直通 VCN：这种进程宁可不装解码补丁，
                     // 让它按原生路径回退软解，也不允许无守卫地灌硬解。
-                    if (legacyProfile) {
+                    if (legacyProfile && !sonomaPatches) {
                         const auto pid = process != nullptr ? proc_pid(process) : -1;
                         if (pid > 0) { NRed::singleton().setProp32("NRedDecodeGuardMissPid", static_cast<UInt32>(pid)); }
                         NRed::singleton().setProp32("NRedDecodeGuardBlind", 1);
@@ -435,7 +458,14 @@ namespace
             memcpy(&value, header + 88 + i * 4, sizeof(value));
             NRed::singleton().setProp32(uuidKeys[i], value);
         }
-        if (legacyProfile && !UserLegacyCompat::matches(readUser, base, header + 88, *legacyProfile)) {
+        if (sonomaPatches) {
+            if (memcmp(header + 88, UserSonomaVideoData::CacheUUID, sizeof(UserSonomaVideoData::CacheUUID)) != 0) {
+                stage(Stage::CacheMismatch, fairPlayPID);
+                NRed::singleton().setProp32("NRedVCNUserSonomaRejected", 1);
+                return result;
+            }
+            NRed::singleton().setProp32("NRedVCNUserSonomaMatched", 1);
+        } else if (legacyProfile && !UserLegacyCompat::matches(readUser, base, header + 88, *legacyProfile)) {
             stage(Stage::CacheMismatch, fairPlayPID);
             NRed::singleton().setProp32("NRedVCNUserLegacyRejected", 1);
             return result;
@@ -468,7 +498,8 @@ namespace
         }
 
         if (fairPlayDecode && !(legacyProfile && legacyNoFairPlay)) {
-            const auto mask = legacyProfile ? legacyProfile->fairPlayMask : FairPlayDecodeMask;
+            const auto mask = sonomaPatches ? UserSonomaVideoData::FairPlayDecodeMask :
+                              (legacyProfile ? legacyProfile->fairPlayMask : FairPlayDecodeMask);
             if (!selectFairPlayDecode(base, patches, patchCount, legacyPatches, mask)) {
                 stage(Stage::CodeMismatch, fairPlayPID);
                 return result;
@@ -587,6 +618,7 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     legacyNoVCNUser = checkKernelArgument("-NRedNoVCNUserLegacy");
     legacyNoFairPlay = checkKernelArgument("-NRedNoDRMVideoLegacy");
     decodeGuard = !checkKernelArgument("-NRedNoDecodeGuard");
+    legacyVCNUser = checkKernelArgument("-NRedLegacyVCNUser");
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
     const auto  rejected   = VCNCapabilities::rejection(deviceID, currentKernelVersion());
@@ -602,6 +634,10 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     }
     devicePatches = UserVideoDecodeData::findDevice(deviceID);
     legacyProfile = UserLegacyData::video(currentKernelVersion().major(), deviceID);
+    // Darwin 23（14）优先用 steve12311 的 Darwin23 数据集；该数据集自带 codec/规格选择，
+    // 且其 CacheUUID 与本机 14.8.9 缓存一致（4C1441FD…），无需运行期守卫。
+    sonomaPatches = currentKernelVersion().major() == 23 ? UserSonomaVideoData::findDevice(deviceID) : nullptr;
+    if (sonomaPatches) { NRed::singleton().setProp32("NRedVCNUserSonomaSource", 1); }
     if (!devicePatches) {
         NRed::singleton().setProp32("NRedVCNUserRejected", 3);
         return;
