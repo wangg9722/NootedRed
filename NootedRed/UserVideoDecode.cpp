@@ -13,6 +13,7 @@
 #include <UserSonomaVideoData.hpp>
 #include <UserSonomaVideoDecodeResolver.hpp>
 #include <UserSequoiaVideoData.hpp>
+#include <UserVP9DecodeResolver.hpp>
 #include <VCN.hpp>
 #include <VCNCapabilities.hpp>
 #include <kern/task.h>
