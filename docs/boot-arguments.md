@@ -5,6 +5,14 @@
 | 参数 | 功能 | 省略时 |
 | --- | --- | --- |
 | `-NRedDisplayFix` | 花屏／卡顿修复，包含 SubmitGuard 与 LegacyBlend 门修复 | 显示修复全部关闭 |
+| `-NRedSubmitGuard` | 只启用提交守卫（命令缓冲空闲尾填 PM4 filler），不触发表面补丁集 | 单独不启用 |
+| `-NRedSubmitGuardSig` | 提交守卫改用驱动映像解析定位（`AMDRadeonX5000MTLDriver` + 映像内偏移 `0x99240`），解析或核验失败回退候选表 | 只用候选表 |
+| `-NRedNoSubmitGuard` | 只关提交守卫，显示修复不受影响 | 守卫随 `-NRedDisplayFix` 启用 |
+| `-NRedVRAMAlloc` | APU 显存分配五级碎片回退（`AMDHWMemory::allocateLargeBlocks`） | 关 |
+| `-NRedAllocPagesUnderflow` | `allocPages` 32 位空洞下溢修，与上面的回退互不依赖 | 关 |
+| `-NRedVCNAfterInit` | VCN0 能力位只在引擎真正 init 成功后暴露，引擎槽位先判空再写 | 关（沿用 `VCN::ready()` 语义） |
+| `-NRedVCNEngineGate` | 用户态解码补丁放行判据由 `allocated()` 收紧为 `engineStarted()`（引擎 `initHardware` 成功才改写用户态） | 关（沿用 `VCN::allocated()`） |
+| `-NRedHookBusyGate` | 登录期 `shared_region_check` 钩子加全局并发闸门，并发/重入直接返回原函数结果 | 关（不加闸门） |
 | `-NRedScratch` | 在 26 上额外启用 SrdShared 与 ComputeScratch（26.0 形状机器码，语义未在 26.7.x 验证过） | 保持关闭 |
 | `-NRedVideoFix` | VCN 硬件视频加速，包含现有解码和编码路径 | VCN 桥接关闭 |
 | `NRedECFix=1` | 使用固件报告的 EC 背光来源 | EC 服务关闭 |
@@ -21,6 +29,7 @@
 不能仅凭该值证明控制权切换。`=0`、其他无效值或省略参数均不启动 EC 服务。
 
 显示开关在 macOS 14/15 启用 LegacyBlend 和 SubmitGuard；在 26 启用提交守卫与 LegacyBlend，
+提交守卫另有 `-NRedSubmitGuard`（只开守卫，不动显示修复）与 `-NRedNoSubmitGuard`（只关守卫）两个独立入口，
 SrdShared、ComputeScratch 需额外加 `-NRedScratch` 才启用（其数据是 26.0 形状，26.7.x 语义未验证），
 保留原生同步策略，不再启用 ImmediateSync。
 26 的 LegacyBlend 是两条协同写入：放行能力位门（`74 28` → `90 90`）并把 `sete cl` 改为
@@ -39,7 +48,7 @@ SrdShared、ComputeScratch 需额外加 `-NRedScratch` 才启用（其数据是 
 
 ```text
 -NRedImmediateSync -NRedSrdShared -NRedLegacyBlend -NRedComputeScratch
--NRedTransfer1x1 -NRedVCN -NRedNoSubmitGuard -NRedHDRIntegerFilter
+-NRedTransfer1x1 -NRedVCN -NRedHDRIntegerFilter
 NRedECBacklight=1 NRedECBacklight=2
 ```
 
@@ -57,3 +66,16 @@ AppleGVA 与编码代码保持原样。14/15 按各自完整原始页面核验�
 `NRedDRMVideoRevision=4` 标识三系统统一权限策略，不代表 DRM 视频已修复。
 既有 Music 实测为普通音乐正常、受保护 MV 有声且进度推进，但视频仍黑屏；统一版本的
 Music／TV 实机回归尚待验证。范围、诊断和验证步骤见 [FairPlay PSP 兼容说明](fairplay-psp-compatibility.md)。
+
+## 14/15 的整函数数据集路径
+
+macOS 14（Darwin 23）与 15（Darwin 24）不再使用运行期解码守卫，改走从参考项目
+（`steve12311/NootedRed`）搬入的整函数数据集：`UserSonomaVideoData.hpp`（CacheUUID
+`4C1441FD…`）与 `UserSequoiaVideoData.hpp`（CacheUUID `0FAEE1E1…`），各 23 个注入站点。
+
+- 数据集自带 codec 与规格选择逻辑，因此这条路径**不装**运行期守卫（守卫入口与数据集站点
+  同片函数区，双重改写会互坏）。
+- 数据集路径匹配到本机缓存 UUID 才会应用，可用 `NRedVCNUserDataSet=1`、
+  `NRedVCNUserDataSetMatched=1`、`NRedVCNUserApplied=16` 判读；
+  不匹配时置 `NRedVCNUserDataSetRejected=1`，退回软解。
+- 关闭整条解码路径仍用 `-NRedNoVCNUserLegacy`（14/15 有效，26 无影响）。
