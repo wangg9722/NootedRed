@@ -159,7 +159,47 @@ namespace
                 }
             }
         }
-        if (entry == 0) { return KERN_INVALID_ARGUMENT; }
+        // 候选偏移全部落空时的兜底：在每个候选附近按页扫描入口特征字节。
+        // 入口按 4 字节对齐，24 字节完整落在单页内；每候选 ±0x40000，共约 1.5MB copyin，
+        // 只在候选表全部失败的一次性路径上执行。
+        if (entry == 0) {
+            static constexpr UInt64 ScanWindow = 0x40000;
+            UInt8                   page[PAGE_SIZE];
+            for (UInt32 i = 0; i < OffsetCount && entry == 0; ++i) {
+                const UInt64 anchorAddr = base + Offsets[i];
+                const UInt64 from = anchorAddr > ScanWindow
+                                        ? (anchorAddr - ScanWindow) & ~static_cast<UInt64>(PAGE_SIZE - 1)
+                                        : 0;
+                const UInt64 to = anchorAddr + ScanWindow;
+                for (UInt64 addr = from; addr + PAGE_SIZE <= to && readUser(addr, page, PAGE_SIZE) == 0;
+                     addr += PAGE_SIZE) {
+                    for (UInt32 off = 0; off + PatchSize <= PAGE_SIZE; off += 4) {
+                        if (memcmp(page + off, EntryOriginal, PatchSize) != 0) { continue; }
+                        entry = addr + off;
+                        memcpy(current, EntryOriginal, sizeof(current));
+                        NRed::singleton().setProp32("NRedDecodeGuardOffsetIndex", i);
+                        NRed::singleton().setProp32("NRedDecodeGuardScanHit", 1);
+                        SYSLOG("UserVideoDecode", "decode guard entry found by scan: candidate=%u off=0x%X",
+                               i, off);
+                        break;
+                    }
+                    if (entry != 0) { break; }
+                }
+            }
+        }
+        if (entry == 0) {
+            // 记录失败现场：base 低 32 位、候选 0 的头 8 字节，便于确认是不是映射基址不同。
+            // 进程号由调用方补记（这里拿不到 proc_t）。
+            NRed::singleton().setProp32("NRedDecodeGuardMissBase", static_cast<UInt32>(base >> 12));
+            if (base < UserSharedCache::UserLimit - Offsets[0]) {
+                UInt32 head[2]{0, 0};
+                if (readUser(base + Offsets[0], head, sizeof(head)) == 0) {
+                    NRed::singleton().setProp32("NRedDecodeGuardMissHead0", head[0]);
+                    NRed::singleton().setProp32("NRedDecodeGuardMissHead1", head[1]);
+                }
+            }
+            return KERN_INVALID_ARGUMENT;
+        }
 
         const UInt64 entryPage = entry & ~static_cast<UInt64>(PAGE_SIZE - 1);
         const UInt64 continuation = entry + PatchSize;
@@ -369,6 +409,15 @@ namespace
                     if (count < 8) {
                         NRed::singleton().setProp32("NRedDecodeGuardRejected", static_cast<UInt32>(installed));
                         SYSLOG("UserVideoDecode", "decode guard rejected: error=0x%X", installed);
+                    }
+                    // 旧系统上守卫缺席就等于超规格提交直通 VCN：这种进程宁可不装解码补丁，
+                    // 让它按原生路径回退软解，也不允许无守卫地灌硬解。
+                    if (legacyProfile) {
+                        const auto pid = process != nullptr ? proc_pid(process) : -1;
+                        if (pid > 0) { NRed::singleton().setProp32("NRedDecodeGuardMissPid", static_cast<UInt32>(pid)); }
+                        NRed::singleton().setProp32("NRedDecodeGuardBlind", 1);
+                        stage(Stage::NoMap, fairPlayPID);
+                        return result;
                     }
                 }
             }
