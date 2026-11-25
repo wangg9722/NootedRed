@@ -48,6 +48,10 @@ namespace
     // VCN0Dec 灌提交，而守卫在 14 上的规格判据尚未按本机布局校准，拦不住 → 通道挂死。
     // -NRedLegacyVCNUser 显式打开后才走原来的解码路径（仅用于实验）。
     bool                              legacyVCNUser{false};
+    // -NRedVCNEngineGate（默认关）：放行判据从「引擎对象已 alloc」收紧为「引擎 initHardware 成功」。
+    // 登录期每个新进程都会进钩子，alloc 成功但 init 未完成时改写用户态会造成
+    // 「解码器已用硬件、引擎未就绪」的不一致，首发请求即 VCN0Dec 超时。
+    bool                              engineGate{false};
     UInt32                            decodeGuardApplied{0}, decodeGuardRejected{0};
     const UserVideoDecodeData::Patch* devicePatches{nullptr};
     // 14（Darwin 23）走 steve12311 的 Darwin23/设备补丁集：按 image + 整函数指纹定位，
@@ -371,7 +375,8 @@ namespace
             fairPlayDecode = true;
             if (pid > 0) { fairPlayPID = static_cast<UInt32>(pid); }
         }
-        if (!VCN::allocated() || !devicePatches) {
+        const bool engineReady = engineGate ? VCN::engineStarted() : VCN::allocated();
+        if (!engineReady || !devicePatches) {
             stage(Stage::NoMap, fairPlayPID);
             return result;
         }
@@ -629,6 +634,9 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     legacyNoFairPlay = checkKernelArgument("-NRedNoDRMVideoLegacy");
     decodeGuard = !checkKernelArgument("-NRedNoDecodeGuard");
     legacyVCNUser = checkKernelArgument("-NRedLegacyVCNUser");
+    // 引擎就绪门（默认关，保持已验证行为）。
+    engineGate = checkKernelArgument("-NRedVCNEngineGate");
+    if (engineGate) { NRed::singleton().setProp32("NRedVCNEngineGate", 1); }
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
     const auto  rejected   = VCNCapabilities::rejection(deviceID, currentKernelVersion());
