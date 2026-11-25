@@ -13,6 +13,7 @@
 | `-NRedVCNAfterInit` | VCN0 能力位只在引擎真正 init 成功后暴露，引擎槽位先判空再写 | 关（沿用 `VCN::ready()` 语义） |
 | `-NRedVCNEngineGate` | 用户态解码补丁放行判据由 `allocated()` 收紧为 `engineStarted()`（引擎 `initHardware` 成功才改写用户态） | 关（沿用 `VCN::allocated()`） |
 | `-NRedHookBusyGate` | 登录期 `shared_region_check` 钩子加全局并发闸门，并发/重入直接返回原函数结果 | 关（不加闸门） |
+| `-NRedVP9Decode` | VP9 硬件解码：发布 `IOGVAXDecode`/`IOGVAVP9Decode`/`IOGVAVP9DecodeCapabilities` 并在 14/15/26 上装 VP9 用户态后端（Profile 0 与 Profile 2） | 关（完全不碰加速器属性） |
 | `-NRedScratch` | 在 26 上额外启用 SrdShared 与 ComputeScratch（26.0 形状机器码，语义未在 26.7.x 验证过） | 保持关闭 |
 | `-NRedVideoFix` | VCN 硬件视频加速，包含现有解码和编码路径 | VCN 桥接关闭 |
 | `NRedECFix=1` | 使用固件报告的 EC 背光来源 | EC 服务关闭 |

@@ -2,7 +2,7 @@
 """dev-v2 开关矩阵静态检查：每个功能都有独立开关，且默认关（数据集/音频除外）。
 
 不依赖硬件，只做源码级断言，防止重放时把默认值改错：
-- 显存两项、VCN 能力位延后、submit-guard 两项、引擎就绪门、并发闸门：默认关；
+- 显存两项、VCN 能力位延后、submit-guard 两项、引擎就绪门、并发闸门、VP9：默认关；
 - 14/15 走整函数数据集时不装运行期守卫（双重改写会互坏）。
 """
 
@@ -47,8 +47,21 @@ def main():
     check("能力位延后 -NRedVCNAfterInit", '-NRedVCNAfterInit' in x5000)
     check("submit-guard 独立开关", '-NRedSubmitGuard' in surface)
     check("submit-guard 映像解析开关", '-NRedSubmitGuardSig' in surface)
+    check("VP9 总开关 -NRedVP9Decode", "-NRedVP9Decode" in video)
+    check("VP9 局部开关默认关", bool(re.search(r"bool\s+enabled\{false\};", video)))
+    check("VP9 能力发布按开关门控", "vp9Requested" in vcn)
+    probe = text(ROOT / "NootedRed" / "VP9Probe.hpp")
+    check(
+        "VP9 能力键齐全",
+        all(k in probe for k in ("IOGVAXDecode", "IOGVAVP9Decode", "IOGVAVP9DecodeCapabilities")),
+    )
 
     print("[2] 放行判据按开关切换")
+    check(
+        "VP9 只在视频补丁落地后安装",
+        bool(re.search(r"if\s*\(VP9::enabled\)\s*\{ VP9::install\(map", video)),
+    )
+    check("VP9 失败撤回能力声明", "VCN::setVP9Ready(false)" in video)
     check(
         "engineGate 打开时才用 engineStarted()",
         bool(re.search(r"engineReady\s*=\s*engineGate\s*\?\s*VCN::engineStarted\(\)\s*:\s*VCN::allocated\(\)", video)),
