@@ -17,6 +17,9 @@ CANDIDATES = [
     ("macOS 26.7.3", 0x310CE9240),   # 映像基址 0x7FFB10C50000
     ("macOS 26.4", 0x310BF1240),     # 映像基址 0x7FFB10B58000
 ]
+# 提交方法在 AMDRadeonX5000MTLDriver 映像内的相对偏移；26.4 与 26.7.3 实测一致，
+# 因此可先用路径解析映像基址再相加，避免为每个系统版本写一条缓存级绝对地址。
+IMAGE_RELATIVE_OFFSET = 0x99240
 METHOD_ORIGINAL = bytes.fromhex("554889e54883ec10488d45f0488938")
 METHOD_PATCH_SIZE = len(METHOD_ORIGINAL)
 PLACEHOLDER = bytes.fromhex("49bb8877665544332211")  # movabs $0x1122334455667788,%r11
@@ -64,6 +67,7 @@ def main() -> None:
         header += f"    0x{offset:X}ULL, // {label} ({mark})\n"
     header += "};\n"
     header += "inline constexpr UInt32 OffsetCount = sizeof(Offsets) / sizeof(Offsets[0]);\n"
+    header += f"inline constexpr UInt64 ImageRelativeOffset = 0x{IMAGE_RELATIVE_OFFSET:X}ULL;\n"
     header += array("MethodOriginal", METHOD_ORIGINAL)
     header += f"inline constexpr UInt32 MethodPatchSize = {METHOD_PATCH_SIZE};\n"
     header += f"inline constexpr UInt32 PayloadJumpOffset = {jump_offset};\n"

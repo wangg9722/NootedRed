@@ -7,6 +7,7 @@ inline constexpr UInt64 Offsets[] = {
     0x310BF1240ULL, // macOS 26.4 (runtime-verified)
 };
 inline constexpr UInt32 OffsetCount = sizeof(Offsets) / sizeof(Offsets[0]);
+inline constexpr UInt64 ImageRelativeOffset = 0x99240ULL;
 inline constexpr UInt8 MethodOriginal[] = {
     0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x10, 0x48, 0x8D, 0x45, 0xF0,
     0x48, 0x89, 0x38,
