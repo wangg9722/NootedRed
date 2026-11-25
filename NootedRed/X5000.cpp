@@ -62,6 +62,73 @@ static const UInt8 kCreateAccelChannelsPatched10_14[]  = {0x8D, 0x04, 0x09, 0x8D
 
 static X5000 moduleInstance;
 
+// 修复 IOAccelMemoryAllocator2::allocPages 在非连续分配时的空洞起点下溢：
+// 空洞的对齐起点 `(holeStart + align - 1) & ~(align - 1)` 可能越过 holeEnd，做无符号 32 位减法后
+// 变成巨大值，于是整个非连续分配直接失败，而不是跳过这个装不下的洞。把 je 改成 jle 即可跳过。
+// allocPages 不是导出符号，所以从 allocateNonContiguous(yyyy…) 里反查它唯一的那条八参数调用。
+static void patchAllocPagesUnderflow(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
+                                     const size_t size)
+{
+    const auto allocNonContig = patcher.solveSymbol(
+        id,
+        "__ZN26AMDRadeonX5000_AMDHWMemory21allocateNonContiguousEP16AMDMemoryElementyyyybby15_eOP_ORIGINATOR9_eOP_"
+        "TYPE",
+        slide, size);
+    if (allocNonContig == 0) {
+        patcher.clearError();
+        SYSLOG("X5000", "Failed to resolve allocateNonContiguous(yyyy); allocPages underflow patch skipped");
+        return;
+    }
+
+    const auto* const fnBytes    = reinterpret_cast<const UInt8*>(allocNonContig);
+    mach_vm_address_t allocPages = 0;
+    for (size_t i = 0; i < 0x110; i++) {
+        // 匹配 `callq allocPages; addq $0x10, %rsp; testb %al, %al`：这是该函数里唯一的八参数调用。
+        if (fnBytes[i] == 0xE8 && fnBytes[i + 5] == 0x48 && fnBytes[i + 6] == 0x83 && fnBytes[i + 7] == 0xC4 &&
+            fnBytes[i + 8] == 0x10 && fnBytes[i + 9] == 0x84 && fnBytes[i + 10] == 0xC0) {
+            SInt32 rel = 0;
+            memcpy(&rel, fnBytes + i + 1, sizeof(rel));
+            allocPages = allocNonContig + i + 5 + static_cast<mach_vm_address_t>(static_cast<SInt64>(rel));
+            break;
+        }
+    }
+    if (allocPages == 0) {
+        SYSLOG("X5000", "Failed to locate allocPages; underflow patch skipped");
+        return;
+    }
+
+    auto* const targetBytes = reinterpret_cast<UInt8*>(allocPages);
+    if (targetBytes[0] != 0x55 || targetBytes[1] != 0x48 || targetBytes[2] != 0x89 || targetBytes[3] != 0xE5) {
+        SYSLOG("X5000", "allocPages prologue mismatch; underflow patch skipped");
+        return;
+    }
+
+    for (size_t off = 0x40; off < 0x160; off++) {
+        // 匹配空洞长度计算：
+        //   +0: 41 29 C9           subl %ecx, %r9d
+        //   +3: 44 23 4D <disp8>   andl <disp8>(%rbp), %r9d
+        //   +7: 0F 84/8E <rel32>   je / jle <skip_hole>
+        //  +13: 4D 8D 34 09        leaq (%r9,%rcx), %r14
+        if (targetBytes[off] == 0x41 && targetBytes[off + 1] == 0x29 && targetBytes[off + 2] == 0xC9 &&
+            targetBytes[off + 3] == 0x44 && targetBytes[off + 4] == 0x23 && targetBytes[off + 5] == 0x4D &&
+            targetBytes[off + 7] == 0x0F && (targetBytes[off + 8] == 0x84 || targetBytes[off + 8] == 0x8E) &&
+            targetBytes[off + 13] == 0x4D && targetBytes[off + 14] == 0x8D && targetBytes[off + 15] == 0x34 &&
+            targetBytes[off + 16] == 0x09) {
+            if (targetBytes[off + 8] == 0x84
+                && MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) == KERN_SUCCESS) {
+                targetBytes[off + 8] = 0x8E;
+                MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+                NRed::singleton().setProp32("NRedAllocPagesPatched", 1);
+                SYSLOG("X5000", "Patched IOAccelMemoryAllocator2::allocPages hole underflow at +0x%zX", off);
+                return;
+            }
+            return;
+        }
+    }
+
+    SYSLOG("X5000", "Failed to locate allocPages hole check; underflow patch skipped");
+}
+
 X5000& X5000::singleton() { return moduleInstance; }
 
 X5000::X5000()
@@ -193,6 +260,49 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     PANIC_COND(!PenguinWizardry::PatternRouteRequest::routeAll(patcher, id, requests, slide, size), "X5000",
                "Failed to route symbols");
 
+    // 显存分配器：APU 上 BAR0 可见域和不可见域背后是同一块系统内存，allocateLargeBlocks 失败大多是碎片，
+    // 而不是总量不足，因此按参考实现分五级回退，把碎片空间利用起来。
+    // 开关 -NRedVRAMAlloc（默认关，保持已验证的稳定行为）。
+    if (checkKernelArgument("-NRedVRAMAlloc")) {
+        this->orgTotalFreeMemory = reinterpret_cast<decltype(this->orgTotalFreeMemory)>(
+            patcher.solveSymbol(id, "__ZN26AMDRadeonX5000_AMDHWMemory15totalFreeMemoryEv", slide, size));
+        this->orgAllocate = reinterpret_cast<decltype(this->orgAllocate)>(patcher.solveSymbol(
+            id,
+            "__ZN26AMDRadeonX5000_AMDHWMemory8allocateEP16AMDMemoryElementyy28_eAMD_MEMORY_ALLOCATION_TYPEb15_eOP_"
+            "ORIGINATOR9_eOP_TYPE",
+            slide, size));
+        this->orgAllocateNonContiguous =
+            reinterpret_cast<decltype(this->orgAllocateNonContiguous)>(
+                patcher.solveSymbol(id,
+                                    "__ZN26AMDRadeonX5000_AMDHWMemory21allocateNonContiguousEP16AMDMemoryElementyy28_"
+                                    "eAMD_MEMORY_ALLOCATION_TYPEbby15_eOP_ORIGINATOR9_eOP_TYPE",
+                                    slide, size));
+
+        if (this->orgTotalFreeMemory != nullptr && this->orgAllocate != nullptr
+            && this->orgAllocateNonContiguous != nullptr) {
+            PenguinWizardry::PatternRouteRequest allocLargeReq{
+                "__ZN26AMDRadeonX5000_AMDHWMemory19allocateLargeBlocksEP16AMDMemoryElementyyy15_eOP_ORIGINATOR9_eOP_TYPEb",
+                wrapAllocateLargeBlocks, this->orgAllocateLargeBlocks};
+            if (allocLargeReq.route(patcher, id, slide, size)) {
+                NRed::singleton().setProp32("NRedVRAMAllocEnabled", 1);
+            }
+            else {
+                patcher.clearError();
+                SYSLOG("X5000", "Failed to route AMDHWMemory::allocateLargeBlocks; allocator fallback skipped");
+            }
+        }
+        else {
+            patcher.clearError();
+            SYSLOG("X5000", "Failed to resolve AMDHWMemory allocator symbols; allocator fallback skipped");
+        }
+    }
+
+    // 开关 -NRedAllocPagesUnderflow（默认关）：allocPages 32 位空洞下溢修，与上面的碎片回退互不依赖。
+    if (checkKernelArgument("-NRedAllocPagesUnderflow")) {
+        patchAllocPagesUnderflow(patcher, id, slide, size);
+        NRed::singleton().setProp32("NRedAllocPagesUnderflowEnabled", 1);
+    }
+
     if (currentKernelVersion() >= MACOS_11) {
         PenguinWizardry::PatternSolveRequest solveRequest{"__ZN30AMDRadeonX5000_AMDGFX9Hardware15notifyGfxAccessEv",
                                                           this->notifyGfxAccess};
@@ -313,10 +423,16 @@ bool X5000::allocateHWEngines(void* const self)
     [[clang::suppress]] singleton().sdma0EngineField(self) = singleton().sdmaEngineMC->alloc();
 
     if (VCN::ready()) {
-        auto* engine = VCN::allocateEngine();
-        // 复用本版本的引擎数组基址和原生类型枚举，不另设固定的 VCN 字段偏移。
-        (singleton().pm4EngineField + kAMDHWEngineTypeVCN0 * sizeof(void*))(self) = engine;
-        if (!engine) { singleton().hasVCN0Field(self) = false; }
+        // 槽位只在引擎真正分配成功后才写入；失败时保持空槽，能力也不暴露。
+        if (auto* const engine = VCN::allocateEngine(); engine != nullptr) {
+            // 复用本版本的引擎数组基址和原生类型枚举，不另设固定的 VCN 字段偏移。
+            (singleton().pm4EngineField + kAMDHWEngineTypeVCN0 * sizeof(void*))(self) = engine;
+            singleton().hasVCN0Field(self) = true;
+        }
+        else {
+            singleton().hasVCN0Field(self) = false;
+        }
+        NRed::singleton().setProp32("NRedVCNCapabilityFlag", singleton().hasVCN0Field(self) ? 1 : 0);
     }
 
     return true;
@@ -344,7 +460,10 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
     singleton().supportedDisplayCountField(self) = 4;
     singleton().hasUVD0Field(self)               = false;
     singleton().hasVCEField(self)                = false;
-    singleton().hasVCN0Field(self)               = VCN::ready();
+    // setupAndInitializeHWCapabilities 在 allocateHWEngines 之前运行（14/15 顺序一致）。
+    // 这里只反映「引擎是否已真正落地」，绝不提前暴露 VCN0：空槽位会让 VideoToolbox
+    // 以为媒体能力可用，登录期一提交就是 VCN0Dec 超时 + GPU reset（UI 卡死）。
+    singleton().hasVCN0Field(self)               = VCN::allocated();
     singleton().hasSDMAPagingQueueField(self)    = false;
     singleton().hasGetAllClockLimitsField(self)  = false;
     if (currentKernelVersion() >= MACOS_10_15) { singleton().dccDisplayableSupportField(self) = true; }
@@ -375,6 +494,91 @@ UInt64 X5000::wrapAdjustVRAMAddress(void* const self, const UInt64 addr)
 }
 
 UInt32 X5000::returnZero() { return 0; }
+
+// 五级回退的大块显存分配。全部按申请尺寸/对齐动态推导，不写死任何数值。
+bool X5000::wrapAllocateLargeBlocks(void* const self, void* const elem, const UInt64 size, const UInt64 align,
+                                    const UInt64 minBlockSize, const UInt32 orig, const UInt32 opType,
+                                    const bool onlyNonVisible)
+{
+    auto& inst = singleton();
+    if (self == nullptr || elem == nullptr || size == 0) { return false; }
+
+    const UInt64 pageAlignedSize = (size + PAGE_MASK) & ~static_cast<UInt64>(PAGE_MASK);
+
+    // 先用 totalFreeMemory 快速失败：内存压力下 IOAcceleratorFamily2 会一个个 evict 小缓冲，
+    // 每次都走一趟 allocator free list 并刷日志，没有意义。
+    if (inst.orgTotalFreeMemory != nullptr && inst.orgTotalFreeMemory(self) < pageAlignedSize) { return false; }
+
+    const UInt64 blockGranularity = minBlockSize >= PAGE_SIZE ? minBlockSize : 0x10000ULL;
+    const UInt64 roundedSize =
+        size > blockGranularity ? ((size + blockGranularity - 1) & ~(blockGranularity - 1)) : pageAlignedSize;
+    const UInt64 safeAlign = align >= blockGranularity ? align : blockGranularity;
+
+    auto tryNonContiguous = [&](const UInt64 requestSize, const UInt64 requestAlign, const UInt32 allocType,
+                                const UInt64 chunkSize) -> bool
+    {
+        if (onlyNonVisible && allocType != 1) { return false; }
+        return inst.orgAllocateNonContiguous(self, elem, requestSize, requestAlign, allocType, false, false, chunkSize,
+                                             orig, opType);
+    };
+
+    auto tryNonContiguousRange = [&](const UInt32 allocType) -> bool
+    {
+        if (onlyNonVisible && allocType != 1) { return false; }
+        if (roundedSize <= blockGranularity) { return false; }
+        if (inst.orgTotalFreeMemory != nullptr && inst.orgTotalFreeMemory(self) < roundedSize) { return false; }
+
+        // chunk 取申请尺寸的次大 2 的幂，装不下再试半个 chunk，再退到块粒度。
+        UInt64 chunkSize = 1;
+        UInt64 tmp       = roundedSize;
+        while ((tmp & 1) == 0) {
+            tmp >>= 1;
+            chunkSize <<= 1;
+        }
+        if (tmp == 1) { chunkSize >>= 1; }
+
+        if (chunkSize >= blockGranularity && tryNonContiguous(roundedSize, align, allocType, chunkSize)) { return true; }
+        if (chunkSize > blockGranularity) {
+            const UInt64 halfChunk = chunkSize >> 1;
+            if (halfChunk >= blockGranularity && tryNonContiguous(roundedSize, align, allocType, halfChunk)) {
+                return true;
+            }
+            if (halfChunk > blockGranularity && tryNonContiguous(roundedSize, align, allocType, blockGranularity)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 1. 非可见域 [256MB, totalVRAM) 连续分配。
+    if (inst.orgAllocate(self, elem, size, align, 1, false, orig, opType)) { return true; }
+    // 2. 可见域 [reservedNdrvEnd, 256MB) 连续分配。
+    if (!onlyNonVisible && inst.orgAllocate(self, elem, size, align, 0, false, orig, opType)) { return true; }
+    // 3. 非可见域非连续分配。
+    if (tryNonContiguousRange(1)) { return true; }
+    // 4. 退到全 UMA 域 [reservedNdrvEnd, totalVRAM)：APU 上可见域和不可见域是同一块系统内存，
+    //    这样能吃掉可见域那段里的碎片空洞。
+    if (!onlyNonVisible && inst.orgAllocate(self, elem, size, align, 2, false, orig, opType)) { return true; }
+    if (tryNonContiguousRange(2)) { return true; }
+    // 5. 碎片严重时的细粒度非连续：16KB 段，再降到 4KB 段。
+    if (pageAlignedSize > 0x4000ULL && minBlockSize <= 0x4000ULL) {
+        const UInt64 align16K = (pageAlignedSize + 0x3FFFULL) & ~0x3FFFULL;
+        if (inst.orgTotalFreeMemory == nullptr || inst.orgTotalFreeMemory(self) >= align16K) {
+            if (tryNonContiguous(align16K, safeAlign, 1, 0x4000ULL)
+                || tryNonContiguous(align16K, safeAlign, 2, 0x4000ULL)) {
+                return true;
+            }
+        }
+    }
+    if (pageAlignedSize > PAGE_SIZE && minBlockSize <= PAGE_SIZE) {
+        if (tryNonContiguous(pageAlignedSize, safeAlign, 1, PAGE_SIZE)
+            || tryNonContiguous(pageAlignedSize, safeAlign, 2, PAGE_SIZE)) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 // Replaces SDMA1 field with SDMA0 because we don't have SDMA1
 // TODO: Investigate why this is needed.
