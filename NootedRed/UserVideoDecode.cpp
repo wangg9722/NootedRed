@@ -357,6 +357,199 @@ namespace
         return selectedCount != 0;
     }
 
+// VP9 用户态后端安装：与视频补丁同进程、互不共享工作区，失败即撤回能力声明。
+    namespace VP9
+    {
+        using namespace UserVP9DecodeData;
+        constexpr UInt32 MaxSites = UserVP9DecodeResolver::MaxSites;
+        constexpr UInt32 MaxPages = MaxSites * 2;
+        static_assert(UserVP9DecodeData::PageCount <= MaxPages);
+
+        enum class State : UInt32
+        {
+            Off,
+            Resolving,
+            Ready,
+            Failed
+        };
+
+        bool                          enabled{false};
+        IOLock*                       lock{nullptr};
+        State                         state{State::Off};
+        UInt64                        resolvedBase{0};
+        UInt8                         resolvedUUID[16]{};
+        UserVP9DecodeResolver::Plan*  plan{nullptr};
+        UInt32                        appliedCount{0}, alreadyCount{0};
+
+        void publishState(const UInt32 value) { NRed::singleton().setProp32("NRedVP9State", value); }
+
+        struct Workspace
+        {
+            struct Row
+            { UInt8 bytes[UserVP9DecodeData::MaxPatchSize]; } saved[MaxSites];
+            UserPatchMemory::Page pages[MaxPages];
+        };
+
+        // 同一启动内只复用相同 UUID 与基址的已核验计划；失败允许后续进程重试。
+        bool resolved(const UInt64 base, const UInt8* uuid)
+        {
+            IOLockLock(lock);
+            if (state == State::Ready) {
+                const bool same = resolvedBase == base && memcmp(resolvedUUID, uuid, sizeof(resolvedUUID)) == 0;
+                IOLockUnlock(lock);
+                return same;
+            }
+            if (state != State::Off || plan == nullptr) {
+                IOLockUnlock(lock);
+                return false;
+            }
+            state = State::Resolving;
+            IOLockUnlock(lock);
+
+            auto* scan = IONew(UInt8, UserSectionCache::Input::ScanSize);
+            bool  ok{false};
+            if (scan != nullptr) {
+                memset(plan, 0, sizeof(*plan));
+                UserSectionCache::Input input{readUser, {}};
+                input.scanBuffer = scan;
+                ok               = UserVP9DecodeResolver::resolve(input, base, *plan, currentKernelVersion().major());
+                IODelete(scan, UInt8, UserSectionCache::Input::ScanSize);
+            }
+            IOLockLock(lock);
+            state        = ok ? State::Ready : State::Off;
+            resolvedBase = ok ? base : 0;
+            if (ok) { memcpy(resolvedUUID, uuid, sizeof(resolvedUUID)); }
+            IOLockUnlock(lock);
+            publishState(ok ? 2 : 3);
+            if (!ok) { SYSLOG("UserVideoDecode", "VP9: cache not verified, backend not installed"); }
+            return ok;
+        }
+
+        // 顺序：全量读回核验 → 页面保护检查 → COW 写入 → 恢复保护；任何一步不满足就不写或回滚。
+        void install(vm_map_t map, const UInt64 base, const UInt8* uuid)
+        {
+            if (!enabled || lock == nullptr || plan == nullptr) { return; }
+            const auto major = currentKernelVersion().major();
+            if (major != 23 && major != 24 && major != 25) { return; }
+            if (!resolved(base, uuid)) {
+                VCN::setVP9Ready(false);
+                return;
+            }
+            auto* work = IONew(Workspace, 1);
+            if (work == nullptr) {
+                VCN::setVP9Ready(false);
+                error(KERN_RESOURCE_SHORTAGE);
+                return;
+            }
+            memset(work, 0, sizeof(*work));
+            const auto siteCount = plan->count;
+            UInt32     pageCount{0}, originals{0}, patched{0};
+            bool       valid{true};
+            for (UInt32 i = 0; valid && i < siteCount; ++i) {
+                const auto& site    = plan->patches[i];
+                const auto  address = base + site.offset;
+                if (site.size == 0 || site.size > UserVP9DecodeData::MaxPatchSize
+                    || site.offset >= UserSharedCache::UserLimit - base
+                    || readUser(address, work->saved[i].bytes, site.size) != 0)
+                {
+                    valid = false;
+                    break;
+                }
+                if (memcmp(work->saved[i].bytes, site.original, site.size) == 0) { ++originals; }
+                else if (memcmp(work->saved[i].bytes, site.patched, site.size) == 0) { ++patched; }
+                else {
+                    valid = false;
+                }
+                if (valid && !UserPatchMemory::collectPages(work->pages, pageCount, address, site.size)) {
+                    valid = false;
+                }
+            }
+            if (!valid || (originals != siteCount && patched != siteCount)) {
+                // 混合态或未知字节：一个站点都不动。
+                NRed::singleton().setProp32("NRedVP9Mixed", 1);
+                VCN::setVP9Ready(false);
+                IODelete(work, Workspace, 1);
+                return;
+            }
+            if (patched == siteCount) {
+                bool executable{true};
+                for (UInt32 p = 0; executable && p < pageCount; ++p) {
+                    vm_prot_t protection{0};
+                    if (!leafProtection(map, work->pages[p].address, protection)
+                        || protection != (VM_PROT_READ | VM_PROT_EXECUTE))
+                    {
+                        executable = false;
+                    }
+                }
+                if (executable) {
+                    VCN::setVP9Ready(true);
+                    NRed::singleton().setProp32("NRedVTDecoderAdmissionRevision", 1);
+                    const auto count = __atomic_fetch_add(&alreadyCount, 1U, __ATOMIC_RELAXED);
+                    if (count < 16) { NRed::singleton().setProp32("NRedVP9Already", count + 1); }
+                } else {
+                    NRed::singleton().setProp32("NRedVP9Region", 1);
+                    VCN::setVP9Ready(false);
+                }
+                IODelete(work, Workspace, 1);
+                return;
+            }
+            for (UInt32 p = 0; p < pageCount; ++p) {
+                vm_prot_t protection{0};
+                if (!leafProtection(map, work->pages[p].address, protection)
+                    || protection != (VM_PROT_READ | VM_PROT_EXECUTE))
+                {
+                    NRed::singleton().setProp32("NRedVP9Region", 1);
+                    VCN::setVP9Ready(false);
+                    IODelete(work, Workspace, 1);
+                    return;
+                }
+            }
+            UInt32 writable{0};
+            for (; writable < pageCount; ++writable) {
+                const auto protection = vm_protect(map, work->pages[writable].address, PAGE_SIZE, FALSE,
+                                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+                if (protection != KERN_SUCCESS) {
+                    NRed::singleton().setProp32("NRedVP9Protection", 1);
+                    restorePages(map, work->pages, writable);
+                    VCN::setVP9Ready(false);
+                    IODelete(work, Workspace, 1);
+                    return;
+                }
+                work->pages[writable].writable = true;
+            }
+            UInt32 written{0};
+            for (; written < siteCount; ++written) {
+                const auto& site = plan->patches[written];
+                if (writeUser(site.patched, base + site.offset, site.size) != 0) { break; }
+            }
+            bool rollbackOk{true};
+            if (written != siteCount) {
+                NRed::singleton().setProp32("NRedVP9WriteFailed", 1);
+                // 页面此刻仍可写，先回填已写站点，再恢复保护。
+                for (UInt32 i = 0; i < written; ++i) {
+                    const auto& site = plan->patches[i];
+                    if (writeUser(work->saved[i].bytes, base + site.offset, site.size) != 0) { rollbackOk = false; }
+                }
+            }
+            const bool protectOk = restorePages(map, work->pages, pageCount);
+            if (written != siteCount || !protectOk) {
+                if (!rollbackOk || !protectOk) { NRed::singleton().setProp32("NRedVP9Rollback", 1); }
+                IOLockLock(lock);
+                state = State::Failed;
+                IOLockUnlock(lock);
+                publishState(4);
+                VCN::setVP9Ready(false);
+                IODelete(work, Workspace, 1);
+                return;
+            }
+            const auto count = __atomic_fetch_add(&appliedCount, 1U, __ATOMIC_RELAXED);
+            VCN::setVP9Ready(true);
+            NRed::singleton().setProp32("NRedVTDecoderAdmissionRevision", 1);
+            if (count < 16) { NRed::singleton().setProp32("NRedVP9Applied", count + 1); }
+            IODelete(work, Workspace, 1);
+        }
+    }    // namespace VP9
+
     int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* returnValue)
     {
         stage(Stage::Called);
@@ -579,6 +772,10 @@ namespace
         if (patched == patchCount) {
             stage(Stage::Already, fairPlayPID);
             if (fairPlayDecode) { NRed::singleton().setProp32("NRedDRMVideoState", 3); }
+            // 视频补丁已是目标态，VP9 后端仍按本进程重新核验后再决定是否发布能力。
+            if (VP9::enabled && args != nullptr) {
+                if (auto vp9Map = getTaskMap(current_task())) { VP9::install(vp9Map, base, &header[88]); }
+            }
             return result;
         }
         if (originals != patchCount) {
@@ -638,6 +835,8 @@ namespace
         }
         auto count = __atomic_fetch_add(&appliedCount, 1U, __ATOMIC_RELAXED);
         if (count < 16) { NRed::singleton().setProp32("NRedVCNUserApplied", count + 1); }
+        // 视频补丁落地后才安装 VP9 后端；失败只撤回能力声明，不影响视频补丁。
+        if (VP9::enabled) { VP9::install(map, base, &header[88]); }
         return result;
     }
 
@@ -703,6 +902,19 @@ void UserVideoDecode::init(KernelPatcher& patcher)
         return;
     }
     NRed::singleton().setProp32("NRedVCNUserEnabled", 1);
+    // -NRedVP9Decode（默认关）：VP9 后端与视频补丁同进程安装，共用本进程的缓存核验结果。
+    VP9::enabled = checkKernelArgument("-NRedVP9Decode");
+    if (VP9::enabled) {
+        if (VP9::lock == nullptr) { VP9::lock = IOLockAlloc(); }
+        if (VP9::plan == nullptr) { VP9::plan = IONew(UserVP9DecodeResolver::Plan, 1); }
+        if (VP9::lock == nullptr || VP9::plan == nullptr) {
+            VP9::enabled = false;
+            NRed::singleton().setProp32("NRedVP9State", 6);
+        } else {
+            NRed::singleton().setProp32("NRedVP9Requested", 1);
+            VP9::publishState(1);
+        }
+    }
     NRed::singleton().setProp32("NRedVCNRegionQueryVersion", 1);
     if (fairPlayDriverOnly) {
         NRed::singleton().setProp32("NRedDRMVideoEnabled", 1);
