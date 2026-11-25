@@ -40,7 +40,7 @@ namespace
     UInt32                            seenStages{0}, appliedCount{0}, errorCount{0};
     bool                              fairPlayDriverOnly{false};
     bool                              decodeGuard{true};
-    bool                              legacyNoVCNUser{false}, legacyNoFairPlay{false}, legacyNoGuard{false};
+    bool                              legacyNoVCNUser{false}, legacyNoFairPlay{false};
     UInt32                            decodeGuardApplied{0}, decodeGuardRejected{0};
     const UserVideoDecodeData::Patch* devicePatches{nullptr};
     const UserLegacyCompat::Profile*  legacyProfile{nullptr};
@@ -350,8 +350,10 @@ namespace
             stage(Stage::CacheMismatch, fairPlayPID);
             return result;
         }
-        // 解码规格守卫独立于渲染修复与 FairPlay 权限：只要缓存与镜像对得上就在本进程装一次。
-        if (decodeGuard && !(legacyProfile && legacyNoGuard)) {
+        // 解码规格守卫独立于渲染修复、FairPlay 权限与旧系统兼容开关：
+        // 只要缓存与镜像对得上就在本进程装一次，唯一控制量是 decodeGuard
+        // （-NRedNoDecodeGuard 关闭，14/15/26 一视同仁）。
+        if (decodeGuard) {
             if (auto map = getTaskMap(current_task())) {
                 bool       fresh{false};
                 const auto installed = installDecodeGuard(map, base, fresh);
@@ -535,7 +537,6 @@ void UserVideoDecode::init(KernelPatcher& patcher)
     // 下列开关只对 legacyProfile 生效，26 上完全无影响，便于在 14 上分组二分定位挂死来源。
     legacyNoVCNUser = checkKernelArgument("-NRedNoVCNUserLegacy");
     legacyNoFairPlay = checkKernelArgument("-NRedNoDRMVideoLegacy");
-    legacyNoGuard    = checkKernelArgument("-NRedNoDecodeGuardLegacy");
     decodeGuard = !checkKernelArgument("-NRedNoDecodeGuard");
     const auto  deviceID   = NRed::singleton().getDeviceID();
     const auto* capability = VCNCapabilities::findDevice(deviceID);
