@@ -10,6 +10,7 @@
 #include <VCNCapabilities.hpp>
 #include <VCNKernelData.hpp>
 #include <VCNKernelProfiles.hpp>
+#include <VP9Probe.hpp>
 #include <libkern/OSKextLib.h>
 #include <libkern/c++/OSMetaClass.h>
 
@@ -42,10 +43,50 @@ namespace
     constexpr unsigned    lengths[] = {37, 35, 30, 28};
     UInt32                hardwareInitCount{0};
     bool                  engineStartedFlag{false};
+    // -NRedVP9Decode（默认关）：只有显式打开才在加速器上发布 VP9 解码能力键。
+    bool                  vp9Requested{false};
+    bool                  vp9BackendReady{false};
 
     bool supported()
     {
         return requested && VCNCapabilities::rejection(NRed::singleton().getDeviceID(), currentKernelVersion()) == 0;
+    }
+
+    // VP9 能力发布：只有在后端安装完成（VCN::setVP9Ready）且 VCN 桥接就绪时才写能力键，
+    // 任何一环不满足就撤回，保证「声明有、实际不通」的假能力不出现。
+    struct VP9ServiceSink
+    {
+        IOService* service;
+        bool       string(const char* key, const char* value) { return service->setProperty(key, value); }
+        bool       profiles(const char* key, const char* arrayKey, const UInt32* values, size_t count)
+        {
+            auto* array = OSArray::withCapacity(static_cast<unsigned>(count));
+            auto* dict  = OSDictionary::withCapacity(1);
+            bool  ok    = array && dict;
+            for (size_t i = 0; ok && i < count; ++i) {
+                auto* number = OSNumber::withNumber(values[i], 32);
+                ok           = number && array->setObject(number);
+                OSSafeReleaseNULL(number);
+            }
+            ok = ok && dict->setObject(arrayKey, array) && service->setProperty(key, dict);
+            OSSafeReleaseNULL(array);
+            OSSafeReleaseNULL(dict);
+            return ok;
+        }
+        void remove(const char* key) { service->removeProperty(key); }
+    };
+
+    void publishVP9Probe(void* self, bool started)
+    {
+        if (!vp9Requested) { return; }
+        VP9ServiceSink sink{static_cast<IOService*>(self)};
+        bool           available;
+        do {
+            available         = __atomic_load_n(&vp9BackendReady, __ATOMIC_ACQUIRE);
+            const auto status = VP9Probe::publish(sink, started && VCN::ready() && available);
+            NRed::singleton().setProp32(VP9Probe::StatusKey, status);
+        }
+        while (available != __atomic_load_n(&vp9BackendReady, __ATOMIC_ACQUIRE));
     }
 
     bool acceleratorStart(void* self, IOService* provider)
@@ -70,6 +111,7 @@ namespace
         const auto result = original(self, provider);
         NRed::singleton().setProp32("NRedVCNAcceleratorStarted", result);
         if (!result && !engineAllocated) { __atomic_store_n(&loadCompleted, false, __ATOMIC_RELEASE); }
+        publishVP9Probe(self, result);
         return result;
     }
 
@@ -262,11 +304,34 @@ namespace
 
 }    // namespace
 
+void VCN::setVP9Ready(const bool available)
+{
+    if (!vp9Requested) { return; }
+    const bool previous = __atomic_exchange_n(&vp9BackendReady, available, __ATOMIC_ACQ_REL);
+    if (previous == available) { return; }
+    auto* matching = IOService::serviceMatching("AMDRadeonX5000_AMDGraphicsAccelerator");
+    auto* services = matching ? IOService::getMatchingServices(matching) : nullptr;
+    OSSafeReleaseNULL(matching);
+    if (!services) { return; }
+    while (auto* service = OSDynamicCast(IOService, services->getNextObject())) {
+        auto* pci = OSDynamicCast(IOPCIDevice, service->getProvider());
+        if (pci && WIOKit::readPCIConfigValue(pci, WIOKit::kIOPCIConfigVendorID) == 0x1002
+            && WIOKit::readPCIConfigValue(pci, WIOKit::kIOPCIConfigDeviceID) == NRed::singleton().getDeviceID())
+        {
+            publishVP9Probe(service, true);
+        }
+    }
+    services->release();
+}
+
 void VCN::init()
 {
     // -NRedNoVCNEngine：仅关闭本地 VCN 引擎分配（保留用户态补丁），用于在旧系统上二分定位挂死来源。
     requested = checkKernelArgument("-NRedVideoFix") && !checkKernelArgument("-NRedNoVCNEngine");
     if (checkKernelArgument("-NRedVideoFix") && !requested) { NRed::singleton().setProp32("NRedVCNEngineDisabled", 1); }
+    // -NRedVP9Decode（默认关）：VP9 能力发布与用户态安装的总开关。
+    vp9Requested = requested && checkKernelArgument("-NRedVP9Decode");
+    if (vp9Requested) { NRed::singleton().setProp32("NRedVP9Requested", 1); }
     if (requested) { lilu.onKextLoadForce(&x6000); }
 }
 bool VCN::ready()

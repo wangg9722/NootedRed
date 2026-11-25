@@ -10,6 +10,7 @@ namespace VCN
     bool  ready();
     bool  allocated();
     bool  engineStarted();
+    void  setVP9Ready(bool available);
     void* allocateEngine();
 
 }    // namespace VCN
