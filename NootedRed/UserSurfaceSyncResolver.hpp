@@ -1,6 +1,7 @@
 // 按驱动路径与完整函数内容解析兼容的共享缓存；仅生成计划，不写入进程。
 #pragma once
 #include <UserSharedCache.hpp>
+#include <UserSurfaceSyncAddressMask.hpp>
 #include <UserSurfaceSyncData.hpp>
 #include <string.h>
 
@@ -60,7 +61,9 @@ namespace UserSurfaceSyncResolver
 
 
     // 大函数在 26.x 上可能有极少量非位移字节差异；按差异预算比较，仍要求前 32 字节严格一致。
-    inline bool similar(Input& input, UInt64 address, const UInt8* expected, UInt32 size, UInt32 maxDiff)
+    // 掩码覆盖的地址字段不参与计数：跨小版本它们必然不同，但指令语义不变。
+    inline bool similar(Input& input, UInt64 address, const UInt8* expected, UInt32 size, UInt32 maxDiff,
+                        const UInt8* addressMask = nullptr)
     {
         UInt8  chunk[256];
         UInt32 diff = 0;
@@ -69,7 +72,11 @@ namespace UserSurfaceSyncResolver
             if (!input.read(address + offset, chunk, length)) { return false; }
             for (UInt32 i = 0; i < length; ++i) {
                 const UInt32 index = offset + i;
-                if (chunk[i] == expected[index] || displacementByte(expected, index, size)) { continue; }
+                if (chunk[i] == expected[index] || displacementByte(expected, index, size)
+                    || UserCacheResolver::maskedAt(addressMask, index))
+                {
+                    continue;
+                }
                 if (++diff > maxDiff) { return false; }
             }
             offset += length;
@@ -86,12 +93,14 @@ namespace UserSurfaceSyncResolver
     }
 
     inline bool matches(Input& input, UInt64 address, const UInt8* expected, UInt32 size,
-                        const RelativeField* fields = nullptr, UInt32 fieldCount = 0, bool blend = false)
+                        const RelativeField* fields = nullptr, UInt32 fieldCount = 0, bool blend = false,
+                        const UInt8* addressMask = nullptr)
     {
         return UserCacheResolver::matchBytes(input, address, size,
                                              [&](UInt32 index, UInt8 value)
                                              {
                                                  return skipped(index, fields, fieldCount)
+                                                        || UserCacheResolver::maskedAt(addressMask, index)
                                                         || (!fields && displacementByte(expected, index, size))
                                                         || (blend
                                                             && ((index >= BlendGateInConstructor
@@ -103,7 +112,8 @@ namespace UserSurfaceSyncResolver
     }
 
     inline bool findFunction(Input& input, const Range& text, const UInt8* expected, UInt32 size, UInt64& found,
-                             bool blend = false, UInt64 hint = 0, UInt32 diffBudget = 0)
+                             bool blend = false, UInt64 hint = 0, UInt32 diffBudget = 0,
+                             const UInt8* addressMask = nullptr)
     {
         if (size < 32) { return false; }
         return UserCacheResolver::scanFunction(
@@ -111,14 +121,18 @@ namespace UserSurfaceSyncResolver
             [&](const UInt8* bytes)
             {
                 for (UInt32 i = 0; i < 32; ++i) {
-                    if (bytes[i] != expected[i] && !displacementByte(expected, i, size)) { return false; }
+                    if (bytes[i] != expected[i] && !displacementByte(expected, i, size)
+                        && !UserCacheResolver::maskedAt(addressMask, i))
+                    {
+                        return false;
+                    }
                 }
                 return true;
             },
             [&](UInt64 address)
             {
-                if (diffBudget && similar(input, address, expected, size, diffBudget)) { return true; }
-                return matches(input, address, expected, size, nullptr, 0, blend);
+                if (diffBudget && similar(input, address, expected, size, diffBudget, addressMask)) { return true; }
+                return matches(input, address, expected, size, nullptr, 0, blend, addressMask);
             },
             found, hint);
     }
@@ -136,7 +150,8 @@ namespace UserSurfaceSyncResolver
             {
                 for (UInt32 i = 0; i < 32; ++i) {
                     if (bytes[i] != BlendConstructor[i]
-                        && !displacementByte(BlendConstructor, i, sizeof(BlendConstructor)))
+                        && !displacementByte(BlendConstructor, i, sizeof(BlendConstructor))
+                        && !UserCacheResolver::maskedAt(UserSurfaceSyncAddressMask::BlendConstructorMask, i))
                     {
                         return false;
                     }
@@ -145,7 +160,11 @@ namespace UserSurfaceSyncResolver
             },
             [&](UInt64 address)
             {
-                if (!similar(input, address, BlendConstructor, sizeof(BlendConstructor), 256)) { return false; }
+                if (!similar(input, address, BlendConstructor, sizeof(BlendConstructor), 256,
+                             UserSurfaceSyncAddressMask::BlendConstructorMask))
+                {
+                    return false;
+                }
                 UInt8 gate[sizeof(BlendGateOriginal)], allow[sizeof(BlendAllowOriginal)];
                 return input.read(address + BlendGateInConstructor, gate, sizeof(gate))
                        && memcmp(gate, BlendGateOriginal, sizeof(gate)) == 0
@@ -156,7 +175,7 @@ namespace UserSurfaceSyncResolver
     }
 
     inline bool resolve(Reader reader, UInt64 base, const DevicePatchSet& device, bool shared, bool blend, Plan& plan,
-                        bool scratchMode = false)
+                        bool scratchMode = false, bool dynamicCache = false)
     {
         Input input{reader, {}};
         Image image;
@@ -165,11 +184,21 @@ namespace UserSurfaceSyncResolver
             return false;
         }
         // Scratch 与撤回的 VT 策略按完整函数和实际相对引用核验。
+        // 动态缓存（26.x 小版本漂移）上只核验 AMD 侧分配器：VideoToolbox 那张目标函数已被整体重写，
+        // 继续要求它会连带把兼容的 AMD 补丁一起拒掉。
         if (scratchMode) {
             using namespace ScratchResolverData;
-            if (!UserCacheResolver::resolve(input, base, ResolverImages, ResolverFunctions, device.scratch + 3,
-                                            ResolverLocations, plan.patches + 4, &plan.original[4][0],
-                                            &plan.patched[4][0], MaxPatchSize))
+            const UInt8* masks[] = {UserSurfaceSyncAddressMask::ResolverOriginal0Mask};
+            const auto   ok      = dynamicCache
+                                     ? UserCacheResolver::resolve(input, base, ResolverImages, ResolverFunctionsAmdOnly,
+                                                        device.scratch + 3, ResolverLocations, plan.patches + 4,
+                                                        &plan.original[4][0], &plan.patched[4][0], MaxPatchSize,
+                                                        masks, 1)
+                                     : UserCacheResolver::resolve(input, base, ResolverImages, ResolverFunctions,
+                                                        device.scratch + 3, ResolverLocations, plan.patches + 4,
+                                                        &plan.original[4][0], &plan.patched[4][0], MaxPatchSize,
+                                                        masks, 1);
+            if (!ok)
             {
                 diagnosticReason() = 2;
                 return false;
@@ -187,13 +216,13 @@ namespace UserSurfaceSyncResolver
         // 连带 LegacyBlend 的门也一条都没打上。
         if (scratchMode
             && !findFunction(input, image.text, ScratchOriginal, sizeof(ScratchOriginal), scratch, false,
-                             image.address + ScratchRVA))
+                             image.address + ScratchRVA, 0, UserSurfaceSyncAddressMask::ResolverOriginal0Mask))
         {
             diagnosticReason() = 32;
             return false;
         }
         if (!findFunction(input, image.text, BlendConstructor, sizeof(BlendConstructor), constructor, true,
-                          image.address + ConstructorRVA, 96))
+                          image.address + ConstructorRVA, 96, UserSurfaceSyncAddressMask::BlendConstructorMask))
         {
             if (!findConstructorWide(input, image.text, constructor)) {
                 diagnosticReason() = 33;

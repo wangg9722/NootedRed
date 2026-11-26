@@ -131,6 +131,16 @@ namespace UserCacheResolver
         return false;
     }
 
+    // 地址字段掩码：位 i 置位表示参考载荷第 i 字节承载 RIP 相对位移或分支目标。
+    // 26.x 小版本之间缓存布局漂移，这些字节必然不同但指令语义不变，匹配时必须跳过；
+    // 与位移豁免的启发式相比，掩码由 tools/gen_surface_address_mask.py 反汇编生成，覆盖完整且不误判。
+    inline constexpr UInt32 MaskedNone = 0xFFFFFFFF;
+
+    inline bool maskedAt(const UInt8* mask, UInt32 index)
+    {
+        return mask != nullptr && ((mask[index / 8] >> (index % 8)) & 1) != 0;
+    }
+
     template<typename Patch>
     inline UInt8 expected(const Function& function, UInt32 index, UInt32 f, bool patched, const Patch* patches,
                           const Location* locations, UInt32 count)
@@ -149,21 +159,25 @@ namespace UserCacheResolver
 
     template<typename Patch>
     inline bool matches(Input& input, UInt64 address, const Function& function, UInt32 f, bool patched,
-                        const Patch* patches, const Location* locations, UInt32 count)
+                        const Patch* patches, const Location* locations, UInt32 count,
+                        const UInt8* addressMask = nullptr)
     {
         const auto* refs     = patched ? function.patchedRefs : function.originalRefs;
         const auto  refCount = patched ? function.patchedCount : function.originalCount;
+        // 掩码按原始布局生成；补丁布局的指令位置不同，仍需退回逐字节比较。
+        const auto* mask = patched ? nullptr : addressMask;
         return matchBytes(input, address, function.size,
                           [&](UInt32 index, UInt8 value)
                           {
-                              return skipped(index, refs, refCount)
+                              return skipped(index, refs, refCount) || maskedAt(mask, index)
                                      || value == expected(function, index, f, patched, patches, locations, count);
                           });
     }
 
     template<typename Patch>
     inline bool find(Input& input, const Range& text, const Function& function, UInt32 f, const Patch* patches,
-                     const Location* locations, UInt32 count, UInt64& address, bool& patched)
+                     const Location* locations, UInt32 count, UInt64& address, bool& patched,
+                     const UInt8* addressMask = nullptr)
     {
         if (function.size < 32) { return false; }
         UInt8 prefixes[2][32];
@@ -174,7 +188,8 @@ namespace UserCacheResolver
             const auto  countRefs = variant ? function.patchedCount : function.originalCount;
             for (UInt32 i = 0; i < 32; ++i) {
                 prefixes[variant][i] = expected(function, i, f, variant != 0, patches, locations, count);
-                masks[variant][i]    = skipped(i, refs, countRefs);
+                masks[variant][i]    = skipped(i, refs, countRefs)
+                                       || (variant == 0 && maskedAt(addressMask, i));
             }
         }
         const auto prefixMatches = [&](const UInt8* bytes)
@@ -194,7 +209,7 @@ namespace UserCacheResolver
         const auto candidateMatches = [&](UInt64 candidate)
         {
             for (UInt32 variant = 0; variant < 2; ++variant) {
-                if (matches(input, candidate, function, f, variant != 0, patches, locations, count)) {
+                if (matches(input, candidate, function, f, variant != 0, patches, locations, count, addressMask)) {
                     patched = variant != 0;
                     return true;
                 }
@@ -323,7 +338,7 @@ namespace UserCacheResolver
     inline bool resolve(Input& input, UInt64 base, const ImageReference (&imageRefs)[ImageCount],
                         const Function (&functions)[FunctionCount], const Patch* patches,
                         const Location (&locations)[PatchCount], Patch* output, UInt8* originals, UInt8* replacements,
-                        UInt32 stride)
+                        UInt32 stride, const UInt8* const* addressMasks = nullptr, UInt32 maskCount = 0)
     {
         static_assert(ImageCount > 0 && ImageCount <= 16 && FunctionCount > 0 && FunctionCount <= 32);
         UInt64      addresses[FunctionCount]{};
@@ -348,7 +363,7 @@ namespace UserCacheResolver
         for (UInt32 i = 0; i < FunctionCount; ++i) {
             if (functions[i].image >= ImageCount
                 || !find(input, images[functions[i].image].text, functions[i], i, patches, locations, PatchCount,
-                         addresses[i], variants[i]))
+                         addresses[i], variants[i], i < maskCount ? addressMasks[i] : nullptr))
             {
                 diagnosticStage() = 0x100 + i;
                 return false;

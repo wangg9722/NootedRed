@@ -419,7 +419,7 @@ int wrappedSharedRegionCheck(proc_t process, SharedRegionCheckArgs* args, int* r
     }
     if (dynamic) {
         if (!UserSurfaceSyncResolver::resolve(readUser, base, *devicePatches, srdShared, legacyBlend, plan,
-                                              scratchHere))
+                                              scratchHere, dynamic))
         {
             stage(Stage::CacheMismatch);
             NRed::singleton().setProp32("NRedImmediateSyncDynStep", UserCacheResolver::diagnosticStage());

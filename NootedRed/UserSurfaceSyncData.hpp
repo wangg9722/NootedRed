@@ -3311,6 +3311,12 @@ inline constexpr UserCacheResolver::Function ResolverFunctions[] = {
     {0, 0xAD11EULL, ResolverOriginal0, sizeof(ResolverOriginal0), ResolverOriginalRefs0, 17, ResolverPatchedRefs0, 17},
     {4, 0x60EDE2ULL, ResolverOriginal1, sizeof(ResolverOriginal1), ResolverOriginalRefs1, 433, ResolverPatchedRefs1, 433},
 };
+// 26.x 上 VideoToolbox 目标函数已整体重写（26.4 与参考载荷 17089/17969 字节不同），
+// 继续把 scratch 补丁绑在它上面会让兼容的 AMD 侧补丁一起被拒（参考项目 3c28aba 同样移除该依赖）。
+// 动态缓存路径只核验 AMD 侧 scratch 分配器，14/15 的固定布局路径仍按两张表核验。
+inline constexpr UserCacheResolver::Function ResolverFunctionsAmdOnly[] = {
+    {0, 0xAD11EULL, ResolverOriginal0, sizeof(ResolverOriginal0), ResolverOriginalRefs0, 17, ResolverPatchedRefs0, 17},
+};
 inline constexpr UserCacheResolver::Location ResolverLocations[] = {
     {0, 0},
 };
