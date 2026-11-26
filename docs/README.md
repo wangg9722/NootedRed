@@ -7,6 +7,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [version-selection-matrix.md](version-selection-matrix.md) | **入口文档**：14/15/26 三条通道如何区分版本、26 门形态双机实测、resolver 的策略耦合原则、装机前离线自检 |
+| [tahoe-26-minor-version-drift.md](tahoe-26-minor-version-drift.md) | 26.x 小版本差异量（26.4 = 116 处 / 26.7.3 = 57 处）、各补丁族容忍度、26 独有 compute 关闭预览卡顿排查 |
 | [macos-multi-os-compat.md](macos-multi-os-compat.md) | 多系统（14/15/26）适配范围与限制 |
 | [boot-arguments.md](boot-arguments.md) | 全部启动参数：`-NRedVideoFix` / `-NRedDisplayFix` / `-NRedScratch` 等 |
 

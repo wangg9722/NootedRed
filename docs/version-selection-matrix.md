@@ -130,3 +130,9 @@ NRedImmediateSyncDynamicApplied = 1
 | Scratch(`ScratchOriginal`) | 452 | 14 处差异，仅 `-NRedScratch` 会因此拒绝 |
 
 凡是出现"整段一致"之外的差异，都要在装机前跑这个脚本，而不是靠重启来验证。
+
+## 八、延伸阅读
+
+各补丁族在 26.4 / 26.7.3 上的差异量对比（26.4 为 116 处，是当前漂移最大的小版本）、
+Scratch 族缺少小版本容忍度的具体数据，以及 26 独有 compute 挂死（关闭 4K 预览卡顿）的排查结论，
+见 [tahoe-26-minor-version-drift.md](tahoe-26-minor-version-drift.md)。
