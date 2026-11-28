@@ -417,15 +417,15 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     }
 }
 
-// VCN 对外暴露的两道门：引擎是否真落地（VCN::allocated）＋ 内核版本封顶。
-// 26.x 上引擎其实能分配成功（现场 NRedVCNEngineAllocated=1），所以单靠能力门会直接放行；
-// 而该系统的 VCN0Dec 提交路径 PendingTS 永不 retire，登录期 VTDecoder 一提交就是复位风暴，
-// 10 秒级连发后 WindowServer 看门狗判死（UI 卡死）。因此 >= 26 默认不暴露 VCN0、
-// 不分配引擎（硬解退回软解），需要继续 bring-up 时用 -NRedVCNOn26 显式打开。
+// VCN 对外暴露：能力门（引擎是否真落地）＋ 26.x 紧急关断。
+// 26.7.3 实测（2026-11-28，0.9.6 暴露 VCN0 后）：引擎分配成功、VideoToolbox 走 VCN0Dec、
+// PendingTS 正常 retire，8 分钟含硬解压测零复位 —— 硬解在该系统上是可用的，
+// 早期把 26 整体封顶属误判。保留 -NRedVCNOffOn26 作为一键回到"不暴露、走软解"的关断，
+// 用于再次出现 VCN0Dec 复位风暴时的现场止血（无需重编）。
 static bool vcnExposedOnThisOS()
 {
     if (currentKernelVersion() < MACOS_26) { return true; }
-    return checkKernelArgument("-NRedVCNOn26");
+    return !checkKernelArgument("-NRedVCNOffOn26");
 }
 
 bool X5000::allocateHWEngines(void* const self)
