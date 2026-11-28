@@ -35,21 +35,49 @@
 3. **提版本**：`dda914b` → `0.9.5`，md5 `3a660fa480d846c1ac60a5205bcc9aac`，UUID `3C4EB592-F9B7-381F-9C89-7215C1635988`，tag `v0.9.5-20261128-vcn-gate`。
 4. **重新部署**：0.9.5 已写进 249 的 ESP（`disk0s1`），等下次开机验证。
 
-## 5. 版本状态
+## 5. 第二刀：能力门在 26.x 上是空转
+
+回滚后重新读现场属性，发现一条决定性事实：**`NRedVCNEngineAllocated = 1`**。
+
+也就是说在 26.7.3 上 `VCN::allocateEngine()` 里的 `engineClass->alloc()` 是**成功**的，`engineAllocated` 为真。而能力门的判据是 `VCN::allocated() = ready() && engineAllocated`，于是在这台机器上第一刀（`1eae870`）**会直接放行**，`hasVCN0` 仍然是 true，重启后必然再走一遍同样的复位风暴。
+
+真正坏掉的不是"槽位空"，而是 26.x 的 VCN0Dec 提交路径：引擎对象有了，命令发出去，`PendingTS = 0x29` 永不 retire。这层没法靠能力门挡住。
+
+据此加第二道门——按内核版本封顶（`49c03185`）：
+
+```cpp
+static bool vcnExposedOnThisOS()
+{
+    if (currentKernelVersion() < MACOS_26) { return true; }
+    return checkKernelArgument("-NRedVCNOn26");
+}
+```
+
+- `allocateHWEngines`：`>= 26` 且没显式开 opt-in 时，不分配 VCN 引擎、槽位留空、`hasVCN0 = false`，并落 `NRedVCNGatedByOS = 1`。
+- `wrapSetupAndInitializeHWCapabilities`：`hasVCN0 = VCN::allocated() && vcnExposedOnThisOS()`。
+- 代价明确：26.x 默认**没有硬解**，VideoToolbox 退回软解；要再做 bring-up 时在 boot-args 加 `-NRedVCNOn26` 即可恢复暴露，不用重新编译。
+
+## 6. 版本状态
 
 | 版本 | 提交 | 26.7.3 可用性 |
 |---|---|---|
 | 0.9.4 | `ee7df9e` | **不可用**：缺能力门，登录期 VCN0Dec 复位风暴 |
-| 0.9.5 | `dda914b` | 已部署待验证（带能力门） |
+| 0.9.5 | `dda914b` | 不够：能力门在 26.x 放行（引擎分配成功），风暴照旧 |
+| 0.9.6 | `49c03185` | 已部署待验证：能力门 + 26.x 版本封顶，默认不暴露 VCN0 |
 
 14.8.9 那台目前在跑 0.9.4（无能力门但 VCN 提交正常 retire），暂无需改动。
 
-## 6. 下次开机的判据
+## 7. 下次开机的判据
 
-- `kmutil showloaded | grep NootedRed` → UUID `3C4EB592-F9B7-381F-9C89-7215C1635988`
-- `ioreg -l | grep NRedVCNCapabilityFlag` → `0` 表示引擎未落地、能力未暴露（预期，硬解退回软解）；`1` 表示引擎已落地
+- `kmutil showloaded | grep NootedRed` → UUID `A25CB964-E32A-3814-89D8-A5B9EC1AB7D5`，版本 0.9.6
+- `ioreg -l | grep NRedVCNGatedByOS` → `1` 表示版本封顶已生效（预期）
+- `ioreg -l | grep NRedVCNEngineAllocated` → 应为 `0`（引擎不再分配）
 - `ls /Library/Logs/DiagnosticReports/*.gpuRestart` → 开机后不应再新增，尤其不应再有 `Restart Channel: 12 VCN0Dec`
-- 若仍出现同通道复位：说明该机的 VCN 引擎分配是"成功"的（门通过了），但提交仍不 retire，下一步只能在 26.x 上关掉 VCN 桥接（从 boot-args 摘 `-NRedVideoFix`），代价是无硬解
+- 若仍出现同通道复位：说明有不走 `hasVCN0` 的提交路径（例如用户态补丁绕过了能力查询），下一步只能摘掉 `-NRedVideoFix` 彻底断开 VCN 桥接
+
+## 8. 操作备注
+
+- 硬断电后 ESP（`disk0s1`，FAT）会出现脏目录，`diskutil mount` 报 `Volume on disk0s1 failed to mount`。先 `sudo fsck_msdos -y /dev/disk0s1` 修复再挂载，否则部署脚本会在空 `$mp` 上静默失败。
 
 ## 7. 回滚
 

@@ -417,12 +417,28 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     }
 }
 
+// VCN 对外暴露的两道门：引擎是否真落地（VCN::allocated）＋ 内核版本封顶。
+// 26.x 上引擎其实能分配成功（现场 NRedVCNEngineAllocated=1），所以单靠能力门会直接放行；
+// 而该系统的 VCN0Dec 提交路径 PendingTS 永不 retire，登录期 VTDecoder 一提交就是复位风暴，
+// 10 秒级连发后 WindowServer 看门狗判死（UI 卡死）。因此 >= 26 默认不暴露 VCN0、
+// 不分配引擎（硬解退回软解），需要继续 bring-up 时用 -NRedVCNOn26 显式打开。
+static bool vcnExposedOnThisOS()
+{
+    if (currentKernelVersion() < MACOS_26) { return true; }
+    return checkKernelArgument("-NRedVCNOn26");
+}
+
 bool X5000::allocateHWEngines(void* const self)
 {
     [[clang::suppress]] singleton().pm4EngineField(self)   = singleton().pm4EngineMC->alloc();
     [[clang::suppress]] singleton().sdma0EngineField(self) = singleton().sdmaEngineMC->alloc();
 
-    if (VCN::ready()) {
+    if (VCN::ready() && !vcnExposedOnThisOS()) {
+        singleton().hasVCN0Field(self) = false;
+        NRed::singleton().setProp32("NRedVCNGatedByOS", 1);
+        NRed::singleton().setProp32("NRedVCNCapabilityFlag", 0);
+    }
+    else if (VCN::ready()) {
         // 槽位只在引擎真正分配成功后才写入；失败时保持空槽，能力也不暴露。
         if (auto* const engine = VCN::allocateEngine(); engine != nullptr) {
             // 复用本版本的引擎数组基址和原生类型枚举，不另设固定的 VCN 字段偏移。
@@ -461,9 +477,9 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
     singleton().hasUVD0Field(self)               = false;
     singleton().hasVCEField(self)                = false;
     // VCN 能力门：setupAndInitializeHWCapabilities 在 allocateHWEngines 之前运行（14/15 顺序一致），
-    // 这里只反映「引擎是否已真正落地」，绝不提前暴露 VCN0：空槽位会让 VideoToolbox
+    // 这里只反映「引擎是否已真正落地」＋ 版本封顶，绝不提前暴露 VCN0：空槽位会让 VideoToolbox
     // 以为媒体能力可用，登录期一提交就是 VCN0Dec 超时 + GPU reset（UI 卡死）。
-    singleton().hasVCN0Field(self)               = VCN::allocated();
+    singleton().hasVCN0Field(self)               = VCN::allocated() && vcnExposedOnThisOS();
     singleton().hasSDMAPagingQueueField(self)    = false;
     singleton().hasGetAllClockLimitsField(self)  = false;
     if (currentKernelVersion() >= MACOS_10_15) { singleton().dccDisplayableSupportField(self) = true; }
