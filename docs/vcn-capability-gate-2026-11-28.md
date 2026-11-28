@@ -63,9 +63,10 @@ static bool vcnExposedOnThisOS()
 |---|---|---|
 | 0.9.4 | `ee7df9e` | **不可用**：缺能力门，登录期 VCN0Dec 复位风暴 |
 | 0.9.5 | `dda914b` | 不够：能力门在 26.x 放行（引擎分配成功），风暴照旧 |
-| 0.9.6 | `49c03185` | 已部署待验证：能力门 + 26.x 版本封顶，默认不暴露 VCN0 |
+| 0.9.6 | `49c03185` | 过度保守：能力门 + 26.x 封顶，硬解被关掉 |
+| 0.9.7 | `c98ce24` | **当前可用版本**：26.x 默认暴露 VCN0，硬解恢复正常，`-NRedVCNOffOn26` 可紧急关断 |
 
-14.8.9 那台目前在跑 0.9.4（无能力门但 VCN 提交正常 retire），暂无需改动。
+14.8.9 那台目前在跑 0.9.0 + 显存补丁（VCN 正常），等音频 A/B 结论后再统一到 0.9.7。
 
 ## 7. 下次开机的判据
 
@@ -79,7 +80,27 @@ static bool vcnExposedOnThisOS()
 
 - 硬断电后 ESP（`disk0s1`，FAT）会出现脏目录，`diskutil mount` 报 `Volume on disk0s1 failed to mount`。先 `sudo fsck_msdos -y /dev/disk0s1` 修复再挂载，否则部署脚本会在空 `$mp` 上静默失败。
 
-## 7. 回滚
+## 9. 更正（同日实测）：26.x 不需要封顶
+
+第 5 节的版本封顶判断被实测推翻。2026-11-28 21:00，249 用 `0.9.6 + -NRedVCNOn26` 开机：
+
+```
+NRedVCNCapabilityFlag = 1        EngineAllocated = 1        GatedByOS（无）
+NRedVCNDecoderPID = 1024         ← VideoToolbox 确实走了 VCN0Dec
+NRedVCNUserApplied = 16
+开机 8 分钟内：0 份 gpuRestart，无 Restart Channel: 12 VCN0Dec
+```
+
+即 26.7.3 的 VCN 引擎分配成功、提交能正常 retire、硬解可用。之前"必须封顶"的结论来自 0.9.4 那次复位风暴，但那次的成因与本节的暴露逻辑并不是同一件事——0.9.6 加开关后的状态和 0.9.4 的暴露状态等价，前者却稳定，说明 0.9.4 的暴风另有触发条件（待查：可能与当次硬断电后的驱动初始化状态、或特定解码格式相关）。
+
+处置（`c98ce24` / `v0.9.7`，md5 `21fee4c9…`，UUID `8A0AE358-3D1D-3036-8EAD-39F2F5F55390`）：
+
+- 26.x 恢复默认暴露 VCN0，硬解不再需要额外开关；
+- 版本门改为**反向紧急关断** `-NRedVCNOffOn26`：再出现 VCN0Dec 复位风暴时，改 boot-args 即可回到"不暴露 / 软解"，不需要重编；
+- 能力门（`VCN::allocated()`）保留，避免"引擎没落地却对外声称有能力"的老坑。
+
+
+## 10. 回滚
 
 ```bash
 sudo bash -c 'diskutil mount disk0s1; mp=$(mount | grep "^/dev/disk0s1 on " | sed "s/^.* on //; s/ (.*$//"); rm -rf "$mp/EFI/OC/Kexts/NootedRed.kext"; cp -R "$mp/EFI/OC/Kexts/NootedRed.kext.bak-v094-20261128" "$mp/EFI/OC/Kexts/NootedRed.kext"; diskutil unmount disk0s1'
